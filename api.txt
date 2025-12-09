@@ -1,0 +1,27 @@
+// fp: File + Position
+fpr: FilePositionRead
+fprv: FilePositionReadVector
+fpw: FilePositionWrite
+fpwv: FilePositionWriteVector
+// f: File
+fr: FileRead
+frv: FileReadVector
+fw: FileWrite
+fwv: FileWriteVector
+// s: Socket
+sr: SockRead
+srv: SockReadVector
+sw: SockWrite
+swv: SockWriteVector
+// e: Execute
+etime: Execute after TIME
+esoon: Execute SOON (next loop)
+// l: loop operation
+lstp: Loop SToP
+lrun: Loop RUN
+lnew: Loop New
+// x: misc/abi compat/runtime feature test/control/meta
+xfeat: FEATure test
+xcntl: CoNTroL runtime option
+xinit: INITialise for a thread
+xtdwn: TearDOWN for a thread (can init later, but not recommended)
