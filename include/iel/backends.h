@@ -42,7 +42,7 @@ typedef void (*iel_fnptr_ldel)(void *ctx);
 typedef int (*iel_fnptr_lrun1)(void *ctx, union iel_arg_un flags);
 
 typedef unsigned long long (*iel_fnptr_xfeat)(void *ctx, union iel_arg_un flags);
-typedef unsigned long long (*iel_fnptr_xcntl)(void *ctx, unsigned char op, unsigned long long arg0, unsigned long long arg1);
+typedef union iel_arg_un (*iel_fnptr_xcntl)(void *ctx, unsigned short op, union iel_arg_un arg0, union iel_arg_un arg1);
 typedef void (*iel_fnptr_xinit)(union iel_arg_un flags);
 typedef void (*iel_fnptr_xtdwn)(union iel_arg_un flags);
 

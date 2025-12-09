@@ -1,3 +1,4 @@
+// TODO: verify iel_arg_un flags is empty
 #define _DEFAULT_SOURCE
 #include <pthread.h>
 #include <time.h>
@@ -32,6 +33,7 @@ void a16from64(unsigned long long i, char str[16]) {
     }
 }
 
+static
 void pu64hx(const char *hint, size_t hintlen, unsigned long long i, char e) {
     if (hint) {
         write(STDERR_FILENO, hint, hintlen);
@@ -163,6 +165,7 @@ void ielb_ioux_wv(void *ctx, iel_pf_fd fd, iel_pf_iov *iov, size_t iovcnt, union
    submit_to_sq((struct iel_iou_ctx_st *)ctx, IORING_OP_WRITEV, fd, (unsigned long long)-1, (unsigned long long)iov, iovcnt, cbp);
 }
 
+static // TODO: remove when exported
 void ielb_iou_etime(void *ctx, unsigned long long millis, union iel_arg_un flags, iel_cbp cbp) {
     // TODO: IORING_OP_TIMEOUT + MINHEAP
 }
@@ -211,7 +214,7 @@ size_t ielb_iou_lsize(void) {
     return sizeof(struct iel_iou_ctx_st);
 }
 volatile sig_atomic_t setup_trapped = 0;
-int ielb_iou_lnew(void *ctx, union iel_arg_un flags) {
+int ielb_ioux_lnew_us(void *ctx, union iel_arg_un flags) {
     (void) flags;
     struct iel_iou_ctx_st *pud = (struct iel_iou_ctx_st *)ctx;
     struct io_uring_params p;
@@ -311,6 +314,7 @@ fail_closefd:;
     close(pud->ring_fd);
     return 1;
 }
+static
 void sigactcb(int sig, siginfo_t *si, void *ctx) {
     (void) ctx;
     setup_trapped = 1;
@@ -338,6 +342,7 @@ struct ielb_ioux_lnewt_arg {
     void *ctx;
     int res;
 };
+static
 void *ielb_ioux_lnewt_cb(void *_arg) {
     struct ielb_ioux_lnewt_arg *arg = _arg;
     struct sigaction sa = {
@@ -346,13 +351,13 @@ void *ielb_ioux_lnewt_cb(void *_arg) {
     };
     sigemptyset(&sa.sa_mask);
     sigaction(SIGSYS, &sa, NULL);
-    int r = ielb_iou_lnew(arg->ctx, IEL_ARG_NULL);
+    int r = ielb_ioux_lnew_us(arg->ctx, IEL_ARG_NULL);
     if (r)
         fprintf(stderr, "erret: %d\n", r);
     arg->res = r;
     return NULL;
 }
-int ielb_iou_lnewt(void *ctx, union iel_arg_un flags) {
+int ielb_iou_lnew(void *ctx, union iel_arg_un flags) {
     (void) flags;
     pthread_t pth;
     int res;
@@ -378,6 +383,15 @@ void ielb_iou_ldel(void *ctx) {
     if (pud->mapptr_cq != pud->mapptr_sq)
         munmap(pud->mapptr_cq, pud->maplen_cq);
     close(pud->ring_fd);
+}
+union iel_arg_un ielb_iou_xcntl(void *ctx, unsigned short op, union iel_arg_un arg0, union iel_arg_un arg1) {
+    struct iel_iou_ctx_st *pud = (struct iel_iou_ctx_st *)ctx;
+    switch (op) {
+        case IELB_IOU_XCNTL_SQLEN:
+            return (union iel_arg_un) { .ull = (unsigned)(ld_rlx(pud->sring_tail) - ld_rlx(pud->sring_head)) };
+        default:
+            return (union iel_arg_un) { .ull = (unsigned long long) -1 };
+    }
 }
 
 unsigned char ielb_iou_vtsetup(struct iel_vtable_st *vt) {
@@ -414,15 +428,15 @@ unsigned char ielb_iou_vtsetup(struct iel_vtable_st *vt) {
     SETUP_VTABLE_NAME(lsize);
 
     // SETUP_VTABLE_NAME(xfeat);
-    // SETUP_VTABLE_NAME(xcntl);
+    SETUP_VTABLE_NAME(xcntl);
 
     int scmode = prctl(PR_GET_SECCOMP);
     // scmode won't be SECCOMP_MODE_STRICT since prctl would be blocked in that case
     if (scmode == SECCOMP_MODE_DISABLED) {
-        SETUP_VTABLE_NAME(lnew);
+        vt->p_lnew = ielb_ioux_lnew_us;
     } else {
         fputs("SECCOMP_MODE_FILTER\n", stderr);
-        SETUP_VTABLE_FN(lnew, lnewt);
+        SETUP_VTABLE_NAME(lnew);
         // Android (app) uses SECCOMP_RET_TRAP:0 (syscall ret 64), and docker uses SECCOMP_RET_ERRNO:EPERM (or lsm?)
         // doesn't work for SECCOMP_RET_KILL_PROCESS
         // Note: the  use of SECCOMP_RET_KILL_THREAD to kill a single thread in a multithreaded process is likely to leave the process in a permanently inconsistent and possibly corrupt state.

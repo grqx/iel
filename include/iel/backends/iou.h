@@ -53,8 +53,17 @@ void ielb_ioux_wv(void *ctx, iel_pf_fd fd, iel_pf_iov *iov, size_t iovcnt, union
 
 int ielb_iou_lrun1(void *ctx, union iel_arg_un flags);
 size_t ielb_iou_lsize(void);
+/* unsafe variant, could crash the thread but might be slightly faster */
+int ielb_ioux_lnew_us(void *ctx, union iel_arg_un flags);
 int ielb_iou_lnew(void *ctx, union iel_arg_un flags);
-int ielb_iou_lnewt(void *ctx, union iel_arg_un flags);
 void ielb_iou_ldel(void *ctx);
+
+union iel_arg_un ielb_iou_xcntl(void *ctx, unsigned short op, union iel_arg_un arg0, union iel_arg_un arg1);
+
+/* Query Submission Queue Length
+ * receives: arg0 = (unused), arg1 = (unused)
+ * returns: .ull = (unsigned) length of the Submission Queue
+ */
+#define IELB_IOU_XCNTL_SQLEN 0
 
 #endif /* ifndef IEL_BACKENDS_IOU_H_ */

@@ -16,11 +16,6 @@
 #include <iel/backends/iou.h>
 #include <iel/arg.h>
 
-#define ld_rlx(atomic_p) atomic_load_explicit(atomic_p, memory_order_relaxed)
-#define ld_acq(atomic_p) atomic_load_explicit(atomic_p, memory_order_acquire)
-#define st_rlx(atomic_p, new_val) atomic_store_explicit(atomic_p, new_val, memory_order_relaxed)
-#define st_rel(atomic_p, new_val) atomic_store_explicit(atomic_p, new_val, memory_order_release)
-
 static inline
 unsigned long long micros()
 {
@@ -122,16 +117,20 @@ int main(void) {
     struct iel_vtable_st vt;
     int ret = 0;
     int lres;
-#define IEL_L_BPF_RET_I(x) BPF_STMT(BPF_RET | BPF_K, x)
-#define IEL_L_BPF_COND_I(cond, k, x) BPF_JUMP(BPF_JMP | BPF_J##cond | BPF_K, k, x, 0)
-#define IEL_L_BPF_NCOND_I(cond, k, x) BPF_JUMP(BPF_JMP | BPF_J##cond | BPF_K, k, 0, x)
-#define IEL_L_BPF_LD(off) BPF_STMT(BPF_LD | BPF_W | BPF_ABS, off)
+#define L_BPF_RET_I(x) BPF_STMT(BPF_RET | BPF_K, x)
+#define L_BPF_COND_I(cond, k, x) BPF_JUMP(BPF_JMP | BPF_J##cond | BPF_K, k, x, 0)
+#define L_BPF_NCOND_I(cond, k, x) BPF_JUMP(BPF_JMP | BPF_J##cond | BPF_K, k, 0, x)
+#define L_BPF_LD(off) BPF_STMT(BPF_LD | BPF_W | BPF_ABS, off)
     struct sock_filter filter[] = {
-        IEL_L_BPF_LD(offsetof(struct seccomp_data, nr)),
-        IEL_L_BPF_NCOND_I(EQ, SYS_io_uring_setup, 1),
-            IEL_L_BPF_RET_I(SECCOMP_RET_TRAP),
-        IEL_L_BPF_RET_I(SECCOMP_RET_ALLOW),
+        L_BPF_LD(offsetof(struct seccomp_data, nr)),
+        L_BPF_NCOND_I(EQ, SYS_io_uring_setup, 1),
+            L_BPF_RET_I(SECCOMP_RET_TRAP),
+        L_BPF_RET_I(SECCOMP_RET_ALLOW),
     };
+#undef L_BPF_RET_I
+#undef L_BPF_COND_I
+#undef L_BPF_NCOND_I
+#undef L_BPF_LD
     struct sock_fprog prog = {
         .filter=filter,
         .len=(sizeof(filter)/sizeof(0[filter])),
@@ -186,7 +185,7 @@ int main(void) {
         fprintf(stderr, "run1 event loop\n");
         vt.p_lrun1(&loop.uring, IEL_ARG_NULL);
     }
-    unsigned sq_len = ld_rlx(loop.uring.sring_tail) - ld_rlx(loop.uring.sring_head);
+    unsigned sq_len = (unsigned) vt.p_xcntl(&loop.uring, IELB_IOU_XCNTL_SQLEN, IEL_ARG_NULL, IEL_ARG_NULL).ull;
     if (sq_len)
         fprintf(stderr, "WARNING: stopping event loop with %u pending submissions in queue\n", sq_len);
 out:;
