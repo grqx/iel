@@ -28,7 +28,7 @@ unsigned long long micros()
 
 struct iel_evloop_info {
     unsigned char stop;
-    struct iel_iou_ctx_st uring;
+    struct iel_iou_ctx_st *uring;
 };
 
 static inline
@@ -68,7 +68,7 @@ void onwrite_comp(iel_cbp _self, int res) {
         else
             fprintf(stderr, "write incomplete: wrote %d/%d bytes\n", res, cbp->sz);
     } else {
-        ielb_iou_fr(&cbp->par->loop->uring, STDIN_FILENO, cbp->par->buf, cbp->par->len, IEL_ARG_NULL, &cbp->par->base);
+        ielb_iou_fr(cbp->par->loop->uring, STDIN_FILENO, cbp->par->buf, cbp->par->len, IEL_ARG_NULL, &cbp->par->base);
     }
     free(cbp);
 }
@@ -81,7 +81,7 @@ void onread_comp(iel_cbp _self, int res) {
         wcb->base.cb = onwrite_comp;
         wcb->sz = res;
         wcb->par = cbp;
-        ielb_iou_fw(&cbp->loop->uring, STDOUT_FILENO, cbp->buf, res, IEL_ARG_NULL, &wcb->base);
+        ielb_iou_fw(cbp->loop->uring, STDOUT_FILENO, cbp->buf, res, IEL_ARG_NULL, &wcb->base);
         return;
     }
     else if (res < 0)
@@ -104,7 +104,7 @@ int amain(struct iel_evloop_info *loop) {
     if (!buf)
         goto err_freecbp;
     cbp->buf = buf;
-    ielb_iou_fr(&loop->uring, STDIN_FILENO, cbp->buf, cbp->len, IEL_ARG_NULL, &cbp->base);
+    ielb_iou_fr(loop->uring, STDIN_FILENO, cbp->buf, cbp->len, IEL_ARG_NULL, &cbp->base);
     return 0;
 err_freecbp:;
     free(cbp);
@@ -151,6 +151,7 @@ int main(void) {
     } else if (lres == IEL_VTSETUP_RET_UNAVAIL) {
         fputs("NO PROVIDERS AVAILABLE!\n", stderr);
     }
+    loop.uring = malloc(ielb_iou_lsize());
 
     fprintf(stderr, "event loop struct size(vtable excluded): %zu\n", ielb_iou_lsize());
     {
@@ -162,7 +163,7 @@ int main(void) {
         iel_fnptr_lnew p_lnew = vt.p_lnew;
         unsigned long long m0 = micros();
         /* Setup io_uring for use */
-        lres = p_lnew(&loop.uring, IEL_ARG_NULL);
+        lres = p_lnew(loop.uring, IEL_ARG_NULL);
         unsigned long long m1 = micros();
         fprintf(stderr, "micros() spent on initialisation: %llu;lres=%d\n", m1 - m0, lres);
     }
@@ -183,13 +184,13 @@ int main(void) {
     fprintf(stderr, "starting event loop\n");
     while (!loop.stop) {
         fprintf(stderr, "run1 event loop\n");
-        vt.p_lrun1(&loop.uring, IEL_ARG_NULL);
+        vt.p_lrun1(loop.uring, IEL_ARG_NULL);
     }
-    unsigned sq_len = (unsigned) vt.p_xcntl(&loop.uring, IELB_IOU_XCNTL_SQLEN, IEL_ARG_NULL, IEL_ARG_NULL).ull;
+    unsigned sq_len = (unsigned) vt.p_xcntl(loop.uring, IELB_IOU_XCNTL_SQLEN, IEL_ARG_NULL, IEL_ARG_NULL).ull;
     if (sq_len)
         fprintf(stderr, "WARNING: stopping event loop with %u pending submissions in queue\n", sq_len);
 out:;
     fprintf(stderr, "main() out\n");
-    vt.p_ldel(&loop.uring);
+    vt.p_ldel(loop.uring);
     return ret;
 }

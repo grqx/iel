@@ -22,6 +22,7 @@
 #include <iel/arg.h>
 #include <iel/backends.h>
 #include <iel/backends/iou.h>
+#include <iel/minheap.h>
 
 static inline
 void a16from64(unsigned long long i, char str[16]) {
@@ -56,10 +57,8 @@ void pu64hx(const char *hint, size_t hintlen, unsigned long long i, char e) {
 #define st_rlx(atomic_p, new_val) atomic_store_explicit(atomic_p, new_val, memory_order_relaxed)
 #define st_rel(atomic_p, new_val) atomic_store_explicit(atomic_p, new_val, memory_order_release)
 
-// read mostly for all members
-/*
+// read mostly
 struct iel_iou_ctx_st {
-    _Alignas(64)
     // ----- hot -----
     // Submission ring pointers
     unsigned _Atomic *sring_tail;  // R,W; release
@@ -74,6 +73,7 @@ struct iel_iou_ctx_st {
     unsigned cring_mask;
     unsigned sring_mask;
     // ----- CACHELINE -----
+    struct iel_mh_st timer_mh;
     // ----- cold(SQPOLL) -----
     int ring_fd;
     // ----- cold(NORM) -----
@@ -83,7 +83,7 @@ struct iel_iou_ctx_st {
     void *mapptr_sq;
     void *mapptr_cq;
 };
-*/
+// char (*__kaboom)[sizeof(struct iel_iou_ctx_st)] = 1;
 
 /*
 * System call wrappers provided since glibc does not yet
@@ -175,6 +175,7 @@ void ielb_ioux_wv(void *ctx, iel_pf_fd fd, iel_pf_iov *iov, size_t iovcnt, union
 
 static // TODO: remove when exported
 void ielb_iou_etime(void *ctx, unsigned long long millis, union iel_arg_un flags, iel_cbp cbp) {
+    // iel_mh
     // TODO: IORING_OP_TIMEOUT + MINHEAP
 }
 
