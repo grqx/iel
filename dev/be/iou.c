@@ -8,6 +8,7 @@
 #include <unistd.h>
 
 #include <stdio.h>
+#include <errno.h>
 #include <stdatomic.h>
 #include <string.h>
 #include <linux/filter.h>  // for BPF struct
@@ -92,6 +93,18 @@ void onread_comp(iel_cbp _self, int res) {
     free(cbp);
 }
 
+void ontimer_comp(iel_cbp _self, int res) {
+    if (res < 0)
+        fprintf(stderr, "timeout res<0, strerror: %s\n", strerror(-res));
+    fprintf(stderr, "3s time out, res=%d\n", res);
+    free(_self);
+}
+
+void taskcb(iel_cbp _self, int res) {
+    fprintf(stderr, "soon: %d\n", res);
+    free(_self);
+}
+
 static inline
 int amain(struct iel_evloop_info *loop) {
     struct cbt_onread_comp *cbp = (struct cbt_onread_comp *)malloc(sizeof(struct cbt_onread_comp));
@@ -105,6 +118,14 @@ int amain(struct iel_evloop_info *loop) {
         goto err_freecbp;
     cbp->buf = buf;
     ielb_iou_fr(loop->uring, STDIN_FILENO, cbp->buf, cbp->len, IEL_ARG_NULL, &cbp->base);
+    iel_cbp timer_cb = malloc(sizeof(struct iel_cb_base));
+    timer_cb->cb = ontimer_comp;
+    for (size_t i = 0; i < 8; ++i) {
+        iel_cbp task_cb = malloc(sizeof(struct iel_cb_base));
+        task_cb->cb = taskcb;
+        ielb_iou_esoon(loop->uring, IEL_ARG_NULL, task_cb);
+    }
+    ielb_iou_etime(loop->uring, 3000, IEL_ARG_NULL, timer_cb);
     return 0;
 err_freecbp:;
     free(cbp);
@@ -122,9 +143,10 @@ int main(void) {
 #define L_BPF_NCOND_I(cond, k, x) BPF_JUMP(BPF_JMP | BPF_J##cond | BPF_K, k, 0, x)
 #define L_BPF_LD(off) BPF_STMT(BPF_LD | BPF_W | BPF_ABS, off)
     struct sock_filter filter[] = {
+        L_BPF_RET_I(SECCOMP_RET_ALLOW),
         L_BPF_LD(offsetof(struct seccomp_data, nr)),
         L_BPF_NCOND_I(EQ, SYS_io_uring_setup, 1),
-            L_BPF_RET_I(SECCOMP_RET_TRAP),
+            L_BPF_RET_I(SECCOMP_RET_ERRNO | EPERM),
         L_BPF_RET_I(SECCOMP_RET_ALLOW),
     };
 #undef L_BPF_RET_I

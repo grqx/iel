@@ -33,7 +33,7 @@ typedef void (*iel_fnptr_srv)(void *ctx, iel_pf_sockfd fd, iel_pf_iov *iov, size
 typedef void (*iel_fnptr_sw)(void *ctx, iel_pf_sockfd fd, const unsigned char *buf, size_t count, union iel_arg_un flags, iel_cbp cbp);
 typedef void (*iel_fnptr_swv)(void *ctx, iel_pf_sockfd fd, iel_pf_iov *iov, size_t iovcnt, union iel_arg_un flags, iel_cbp cbp);
 
-typedef void (*iel_fnptr_etime)(void *ctx, unsigned long long millis, union iel_arg_un flags, iel_cbp cbp);
+typedef void (*iel_fnptr_etime)(void *ctx, unsigned long long time, union iel_arg_un flags, iel_cbp cbp);
 typedef void (*iel_fnptr_esoon)(void *ctx, union iel_arg_un flags, iel_cbp cbp);
 
 typedef size_t (*iel_fnptr_lsize)(void);

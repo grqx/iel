@@ -26,6 +26,10 @@ void ielb_ioux_wv(void *ctx, iel_pf_fd fd, iel_pf_iov *iov, size_t iovcnt, union
 #define ielb_iou_sw ielb_ioux_w
 #define ielb_iou_swv ielb_ioux_wv
 
+/* maybe this should return a handle that allows cancelling */
+void ielb_iou_etime(void *ctx, unsigned long long time, union iel_arg_un flags, iel_cbp cbp);
+void ielb_iou_esoon(void *ctx, union iel_arg_un flags, iel_cbp cbp);
+
 int ielb_iou_lrun1(void *ctx, union iel_arg_un flags);
 size_t ielb_iou_lsize(void);
 /* unsafe variant, could crash the thread but might be slightly faster */

@@ -18,7 +18,7 @@ void us2ts(struct timespec *t, unsigned long long us) {
     t->tv_nsec = (us % US_HZ) * 1000;
 }
 
-#include "iel/minheap.h"
+#include <iel/minheap.h>
 
 #include <stdio.h>
 int main(void) {

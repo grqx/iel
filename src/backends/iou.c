@@ -20,9 +20,9 @@
 #include <linux/io_uring.h>
 
 #include <iel/arg.h>
+#include <iel/que.h>
 #include <iel/backends.h>
 #include <iel/backends/iou.h>
-#include <iel/minheap.h>
 
 static inline
 void a16from64(unsigned long long i, char str[16]) {
@@ -34,7 +34,7 @@ void a16from64(unsigned long long i, char str[16]) {
     }
 }
 
-static
+static inline
 void pu64hx(const char *hint, size_t hintlen, unsigned long long i, char e) {
     if (hint) {
         write(STDERR_FILENO, hint, hintlen);
@@ -73,7 +73,7 @@ struct iel_iou_ctx_st {
     unsigned cring_mask;
     unsigned sring_mask;
     // ----- CACHELINE -----
-    struct iel_mh_st timer_mh;
+    struct iel_que_st taskque;
     // ----- cold(SQPOLL) -----
     int ring_fd;
     // ----- cold(NORM) -----
@@ -83,7 +83,8 @@ struct iel_iou_ctx_st {
     void *mapptr_sq;
     void *mapptr_cq;
 };
-// char (*__kaboom)[sizeof(struct iel_iou_ctx_st)] = 1;
+// #define PEXPR(x) static char (*__kaboom ## __COUNTER__)[x] = 1;
+// PEXPR(sizeof(struct iel_iou_ctx_st))
 
 /*
 * System call wrappers provided since glibc does not yet
@@ -173,18 +174,60 @@ void ielb_ioux_wv(void *ctx, iel_pf_fd fd, iel_pf_iov *iov, size_t iovcnt, union
     submit_to_sq((struct iel_iou_ctx_st *)ctx, IORING_OP_WRITEV, fd, (unsigned long long)-1, (unsigned long long)iov, iovcnt, cbp);
 }
 
-static // TODO: remove when exported
-void ielb_iou_etime(void *ctx, unsigned long long millis, union iel_arg_un flags, iel_cbp cbp) {
-    // iel_mh
-    // TODO: IORING_OP_TIMEOUT + MINHEAP
+struct ielb_ioux_etime_cbt {
+    struct iel_cb_base base;
+    struct timespec *ts;
+    iel_cbp cbp;
+};
+
+static
+void ielb_ioux_etime_cb(iel_cbp _self, int res) {
+    struct ielb_ioux_etime_cbt *cbp = (struct ielb_ioux_etime_cbt *)_self;
+    iel_cbp cbp_inner = cbp->cbp;
+
+    free(cbp->ts);
+    free(cbp);
+    cbp_inner->cb(cbp_inner, res == -ETIME ? 0 : res);
+}
+
+void ielb_iou_etime(void *ctx, unsigned long long time, union iel_arg_un flags, iel_cbp cbp) {
+    (void) flags;
+    struct iel_iou_ctx_st *pud = (struct iel_iou_ctx_st *)ctx;
+    struct timespec *pts = malloc(sizeof(struct timespec));
+    struct ielb_ioux_etime_cbt *wcbp = malloc(sizeof(struct ielb_ioux_etime_cbt));
+    wcbp->base.cb = ielb_ioux_etime_cb;
+    wcbp->ts = pts;
+    wcbp->cbp = cbp;
+
+    pts->tv_sec = time / 1000;
+    pts->tv_nsec = (time % 1000) * 1000000;
+    submit_to_sq(pud, IORING_OP_TIMEOUT, 0, 0, (unsigned long long) pts, 1, &wcbp->base);
+}
+
+void ielb_iou_esoon(void *ctx, union iel_arg_un flags, iel_cbp cbp) {
+    (void) flags;
+    struct iel_iou_ctx_st *pud = (struct iel_iou_ctx_st *)ctx;
+    iel_que_push1(&pud->taskque, cbp);
 }
 
 int ielb_iou_lrun1(void *ctx, union iel_arg_un flags) {
+    (void) flags;
     struct iel_iou_ctx_st *pud = (struct iel_iou_ctx_st *)ctx;
     unsigned head;
+    unsigned sq_len;
+    {
+        int queres;
+        iel_cbp task;
+        while (1) {
+            queres = iel_que_pop1(&pud->taskque, (void **)&task);
+            if (queres < 0) break;
+            task->cb(task, 0);
+        }
+        iel_que_qtrim(&pud->taskque);
+    }
 
     // relaxed because no synchronisation needed
-    unsigned sq_len = ld_rlx(pud->sring_tail) - ld_rlx(pud->sring_head);
+    sq_len = ld_rlx(pud->sring_tail) - ld_rlx(pud->sring_head);
     fprintf(stderr, "awaiting submission of %u SQEs and completion of 1 event\n", sq_len);
     /*
     * Tell the kernel we have submitted events with the io_uring_enter()
@@ -313,7 +356,13 @@ int ielb_ioux_lnew_us(void *ctx, union iel_arg_un flags) {
     pud->cring_mask = *PTR_OFFSET_CAST(pud->mapptr_cq, p.cq_off.ring_mask, unsigned);
     pud->cqes = PTR_OFFSET(pud->mapptr_cq, p.cq_off.cqes);
 
+    if (iel_que_init(&pud->taskque, 0) < 0) {
+        goto fail_unmapsqes;
+    }
+
     return 0;
+fail_unmapsqes:;
+    munmap(pud->mapptr_sqes, pud->maplen_sqes);
 fail_unmapcq:;
     if (!(p.features & IORING_FEAT_SINGLE_MMAP))
         munmap(pud->mapptr_cq, pud->maplen_cq);
@@ -387,6 +436,7 @@ int ielb_iou_lnew(void *ctx, union iel_arg_un flags) {
 }
 void ielb_iou_ldel(void *ctx) {
     struct iel_iou_ctx_st *pud = (struct iel_iou_ctx_st *)ctx;
+    iel_que_del(&pud->taskque);
     munmap(pud->mapptr_sqes, pud->maplen_sqes);
     munmap(pud->mapptr_sq, pud->maplen_sq);
     if (pud->mapptr_cq != pud->mapptr_sq)
@@ -429,8 +479,8 @@ unsigned char ielb_iou_vtsetup(struct iel_vtable_st *vt) {
     SETUP_VTABLE_NAME(sw);
     SETUP_VTABLE_NAME(swv);
 
-    // SETUP_VTABLE_NAME(etime);
-    // SETUP_VTABLE_NAME(esoon);
+    SETUP_VTABLE_NAME(etime);
+    SETUP_VTABLE_NAME(esoon);
 
     SETUP_VTABLE_NAME(ldel);
     SETUP_VTABLE_NAME(lrun1);
@@ -446,7 +496,7 @@ unsigned char ielb_iou_vtsetup(struct iel_vtable_st *vt) {
     } else {
         fputs("SECCOMP_MODE_FILTER\n", stderr);
         SETUP_VTABLE_NAME(lnew);
-        // Android (app) uses SECCOMP_RET_TRAP:0 (syscall ret 64), and docker uses SECCOMP_RET_ERRNO:EPERM (or lsm?)
+        // Android (app) uses SECCOMP_RET_TRAP (syscall ret 64), and docker uses SECCOMP_RET_ERRNO | EPERM (or lsm?)
         // doesn't work for SECCOMP_RET_KILL_PROCESS
         // Note: the  use of SECCOMP_RET_KILL_THREAD to kill a single thread in a multithreaded process is likely to leave the process in a permanently inconsistent and possibly corrupt state.
 
