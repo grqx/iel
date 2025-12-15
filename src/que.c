@@ -3,8 +3,7 @@
 #include <iel/que.h>
 #include <string.h>
 
-// TODO: 9
-#define IEL_PQ_CHUNK_ENTS_BIT 2
+#define IEL_PQ_CHUNK_ENTS_BIT 7
 #define IEL_PQ_CHUNK_ENTS (1U << IEL_PQ_CHUNK_ENTS_BIT)
 #define IEL_PQ_CHUNK_ENTS_MASK (IEL_PQ_CHUNK_ENTS - 1)
 #define IEL_PQ_CHUNK_SZ (sizeof(iel_que_elem) << IEL_PQ_CHUNK_ENTS_BIT)

@@ -210,21 +210,24 @@ void ielb_iou_esoon(void *ctx, union iel_arg_un flags, iel_cbp cbp) {
     iel_que_push1(&pud->taskque, cbp);
 }
 
+static inline
+void ielb_ioux_drainque(struct iel_que_st *que) {
+    int queres;
+    iel_cbp task;
+    while (1) {
+        queres = iel_que_pop1(que, (void **)&task);
+        if (queres < 0) break;
+        task->cb(task, 0);
+    }
+    iel_que_qtrim(que);
+}
+
 int ielb_iou_lrun1(void *ctx, union iel_arg_un flags) {
     (void) flags;
     struct iel_iou_ctx_st *pud = (struct iel_iou_ctx_st *)ctx;
     unsigned head;
     unsigned sq_len;
-    {
-        int queres;
-        iel_cbp task;
-        while (1) {
-            queres = iel_que_pop1(&pud->taskque, (void **)&task);
-            if (queres < 0) break;
-            task->cb(task, 0);
-        }
-        iel_que_qtrim(&pud->taskque);
-    }
+    ielb_ioux_drainque(&pud->taskque);
 
     // relaxed because no synchronisation needed
     sq_len = ld_rlx(pud->sring_tail) - ld_rlx(pud->sring_head);
@@ -237,7 +240,7 @@ int ielb_iou_lrun1(void *ctx, union iel_arg_un flags) {
     * */
     int ret = io_uring_enter(pud->ring_fd, sq_len, 1,
                               IORING_ENTER_GETEVENTS);
-    if(ret < 0) {
+    if (ret < 0) {
         perror("io_uring_enter");
         return ret;
     }
@@ -259,6 +262,10 @@ int ielb_iou_lrun1(void *ctx, union iel_arg_un flags) {
 
         /* Write barrier so that update to the head are made visible */
         st_rel(pud->cring_head, ++head);
+
+        if (head == ld_acq(pud->cring_tail)) break;
+
+        ielb_ioux_drainque(&pud->taskque);
     }
     return 0;
 }
