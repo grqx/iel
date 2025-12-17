@@ -1,4 +1,6 @@
 // TODO: verify iel_arg_un flags is empty
+// TODO: return handle or error to allow cancelling
+// TODO: queue
 #define _DEFAULT_SOURCE
 #include <pthread.h>
 #include <time.h>
