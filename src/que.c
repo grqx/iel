@@ -87,16 +87,15 @@ void iel_que_trim(struct iel_que_st *que) {
     iel_que_sz sz = que->chunk_e - que->chunk_s;
     iel_que_sz mapcap_new;
     if (que->os_e) {  // chunk_e allocated
-        if (sz)  // more than one chunk allocated
+        if (sz || que->os_e != que->os_s)  // one or more chunk allocated
             ++sz;
-        else {  // empty/single chunk
-            if (que->os_e == que->os_s) {  // empty
-                free(que->map[que->chunk_e]);
-                que->os_s = que->os_e = 0;
-            }
+        else {  // free allocated empty chunk
+            free(que->map[que->chunk_e]);
+            que->os_s = que->os_e = 0;
         }
     }
     memmove(que->map, &que->map[que->chunk_s], sz * sizeof(iel_que_elem_p));
+    // memset(que->map + sz, 0, que->mapcap - sz);
     que->chunk_s = 0;
     que->chunk_e -= offs;
     mapcap_new = sz < IEL_PQ_MINCHUNKS ? IEL_PQ_MINCHUNKS : sz;

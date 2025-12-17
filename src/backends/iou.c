@@ -80,6 +80,7 @@ struct iel_iou_ctx_st {
     unsigned int maplen_sqes;
     unsigned int maplen_sq;
     unsigned int maplen_cq;
+    unsigned long long feat;
     void *mapptr_sq;
     void *mapptr_cq;
 };
@@ -191,17 +192,30 @@ void ielb_ioux_etime_cb(iel_cbp _self, int res) {
 }
 
 void ielb_iou_etime(void *ctx, unsigned long long time, union iel_arg_un flags, iel_cbp cbp) {
-    (void) flags;
     struct iel_iou_ctx_st *pud = (struct iel_iou_ctx_st *)ctx;
     struct timespec *pts = malloc(sizeof(struct timespec));
-    struct ielb_ioux_etime_cbt *wcbp = malloc(sizeof(struct ielb_ioux_etime_cbt));
-    wcbp->base.cb = ielb_ioux_etime_cb;
-    wcbp->ts = pts;
-    wcbp->cbp = cbp;
+    if (flags.ull & IEL_FLAG_ETIME_MICROS) {
+        flags.ull &= ~IEL_FLAG_ETIME_MICROS;
+        pts->tv_sec = time / 1000000;
+        pts->tv_nsec = (time % 1000000) * 1000;
+    } else {
+        pts->tv_sec = time / 1000;
+        pts->tv_nsec = (time % 1000) * 1000000;
+    }
+    if (flags.ull) {
+        cbp->cb(cbp, -EINVAL);
+        free(pts);
+        return;
+    }
+    {
+        struct ielb_ioux_etime_cbt *wcbp = malloc(sizeof(struct ielb_ioux_etime_cbt));
 
-    pts->tv_sec = time / 1000;
-    pts->tv_nsec = (time % 1000) * 1000000;
-    submit_to_sq(pud, IORING_OP_TIMEOUT, 0, 0, (unsigned long long) pts, 1, &wcbp->base);
+        wcbp->base.cb = ielb_ioux_etime_cb;
+        wcbp->ts = pts;
+        wcbp->cbp = cbp;
+
+        submit_to_sq(pud, IORING_OP_TIMEOUT, 0, 0, (unsigned long long) pts, 1, &wcbp->base);
+    }
 }
 
 void ielb_iou_esoon(void *ctx, union iel_arg_un flags, iel_cbp cbp) {
@@ -367,6 +381,8 @@ int ielb_ioux_lnew_us(void *ctx, union iel_arg_un flags) {
         goto fail_unmapsqes;
     }
 
+    pud->feat = IEL_FEAT_AVAIL | IEL_FEAT_ETIME_MICROS;
+
     return 0;
 fail_unmapsqes:;
     munmap(pud->mapptr_sqes, pud->maplen_sqes);
@@ -451,6 +467,9 @@ void ielb_iou_ldel(void *ctx) {
     close(pud->ring_fd);
 }
 union iel_arg_un ielb_iou_xcntl(void *ctx, unsigned short op, union iel_arg_un arg0, union iel_arg_un arg1) {
+    (void) arg0;
+    (void) arg1;
+
     struct iel_iou_ctx_st *pud = (struct iel_iou_ctx_st *)ctx;
     switch (op) {
         case IELB_IOU_XCNTL_SQLEN:
@@ -458,6 +477,19 @@ union iel_arg_un ielb_iou_xcntl(void *ctx, unsigned short op, union iel_arg_un a
         default:
             return (union iel_arg_un) { .ull = (unsigned long long) -1 };
     }
+}
+
+unsigned long long ielb_iou_cap = IEL_FEAT_AVAIL | IEL_FEAT_ETIME_MICROS;
+
+unsigned long long ielb_iou_xfeat(void *ctx, union iel_arg_un flags) {
+    (void) flags;
+    struct iel_iou_ctx_st *pud = (struct iel_iou_ctx_st *)ctx;
+    if (!ctx) return 0;
+    return pud->feat;
+}
+
+void (ielb_ioux_nop_a)(union iel_arg_un flags) {
+    (void) flags;
 }
 
 unsigned char ielb_iou_vtsetup(struct iel_vtable_st *vt) {
@@ -493,8 +525,11 @@ unsigned char ielb_iou_vtsetup(struct iel_vtable_st *vt) {
     SETUP_VTABLE_NAME(lrun1);
     SETUP_VTABLE_NAME(lsize);
 
-    // SETUP_VTABLE_NAME(xfeat);
+    SETUP_VTABLE_NAME(xfeat);
     SETUP_VTABLE_NAME(xcntl);
+
+    SETUP_VTABLE_NAME(xinit);
+    SETUP_VTABLE_NAME(xtdwn);
 
     int scmode = prctl(PR_GET_SECCOMP);
     // scmode won't be SECCOMP_MODE_STRICT since prctl would be blocked in that case

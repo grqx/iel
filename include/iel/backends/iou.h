@@ -38,6 +38,14 @@ int ielb_iou_lnew(void *ctx, union iel_arg_un flags);
 void ielb_iou_ldel(void *ctx);
 
 union iel_arg_un ielb_iou_xcntl(void *ctx, unsigned short op, union iel_arg_un arg0, union iel_arg_un arg1);
+unsigned long long ielb_iou_xfeat(void *ctx, union iel_arg_un flags);
+void ielb_ioux_nop_a(union iel_arg_un flags);
+
+#define ielb_iou_xinit ielb_ioux_nop_a
+#define ielb_iou_xtdwn ielb_ioux_nop_a
+#define ielb_ioux_nop_a(_)
+
+extern unsigned long long ielb_iou_cap;
 
 /* Query Submission Queue Length
  * receives: arg0 = (unused), arg1 = (unused)

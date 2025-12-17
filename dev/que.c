@@ -75,10 +75,10 @@ int main(void) {
         }
         pque(&que);
         printf("sz: %zu\n", iel_que_size(&que));
-        while (1) {
+        for (size_t i = 0; i < 32; ++i) {
             iel_que_elem vout;
             res = iel_que_pop1(&que, &vout);
-            if (res < 0) break;
+            if (res < 0) return 3;
             printf("pop: %p; sz: %zu\n", vout, iel_que_size(&que));
         }
         pque(&que);
@@ -86,7 +86,14 @@ int main(void) {
         puts("trimmed1");
         pque(&que);
     }
+    while (1) {
+        iel_que_elem vout;
+        res = iel_que_pop1(&que, &vout);
+        if (res < 0) break;
+        printf("pop: %p; sz: %zu\n", vout, iel_que_size(&que));
+    }
     res = iel_que_push1(&que, (iel_que_elem)(uintptr_t)42);
+    iel_que_trim(&que);
     if (res < 0) return 4;
     puts("out");
     pque(&que);

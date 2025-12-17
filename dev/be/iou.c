@@ -1,3 +1,4 @@
+#include "iel/backends.h"
 #define _DEFAULT_SOURCE
 #define _POSIX_C_SOURCE 199309L
 #include <time.h>
@@ -125,7 +126,7 @@ int amain(struct iel_evloop_info *loop) {
         task_cb->cb = taskcb;
         ielb_iou_esoon(loop->uring, IEL_ARG_NULL, task_cb);
     }
-    ielb_iou_etime(loop->uring, 3000, IEL_ARG_NULL, timer_cb);
+    ielb_iou_etime(loop->uring, 3000000, IEL_ARG(IEL_FLAG_ETIME_MICROS), timer_cb);
     return 0;
 err_freecbp:;
     free(cbp);
