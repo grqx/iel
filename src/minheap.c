@@ -3,7 +3,7 @@
 #include <stdlib.h>
 
 #include <iel/arg.h>
-#include <iel/minheap.h>
+#include <iel_priv/minheap.h>
 
 struct iel_mh_node_st {
     union iel_arg_un v;

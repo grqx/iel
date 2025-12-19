@@ -22,9 +22,13 @@
 #include <linux/io_uring.h>
 
 #include <iel/arg.h>
-#include <iel/que.h>
 #include <iel/backends.h>
 #include <iel/backends/iou.h>
+#include <iel_priv/quep.h>
+
+#define IEL_QUE_IMPL
+#define IEL_QUE_TPL (/*ChunkEntsBit=*/6, /*MinChunks=*/8, /*type=*/struct io_uring_sqe, /*pfx=*/ielb_ioux_xsq_, /*sfx=*/, /*api=*/static inline)
+#include <iel_priv/que.tpl.h>
 
 static inline
 void a16from64(unsigned long long i, char str[16]) {
@@ -223,7 +227,7 @@ void ielb_iou_etime(void *ctx, unsigned long long time, union iel_arg_un flags, 
 void ielb_iou_esoon(void *ctx, union iel_arg_un flags, iel_cbp cbp) {
     (void) flags;
     struct iel_iou_ctx_st *pud = (struct iel_iou_ctx_st *)ctx;
-    iel_que_push1(&pud->taskque, cbp);
+    iel_quep_push1(&pud->taskque, cbp);
 }
 
 static inline
@@ -231,11 +235,11 @@ void ielb_ioux_drainque(struct iel_que_st *que) {
     int queres;
     iel_cbp task;
     while (1) {
-        queres = iel_que_pop1(que, (void **)&task);
+        queres = iel_quep_pop1(que, (void **)&task);
         if (queres < 0) break;
         task->cb(task, 0);
     }
-    iel_que_qtrim(que);
+    iel_quep_qtrim(que);
 }
 
 int ielb_iou_lrun1(void *ctx, union iel_arg_un flags) {
@@ -288,7 +292,10 @@ int ielb_iou_lrun1(void *ctx, union iel_arg_un flags) {
 size_t ielb_iou_lsize(void) {
     return sizeof(struct iel_iou_ctx_st);
 }
+
+static
 volatile sig_atomic_t setup_trapped = 0;
+
 int ielb_ioux_lnew_us(void *ctx, union iel_arg_un flags) {
     (void) flags;
     struct iel_iou_ctx_st *pud = (struct iel_iou_ctx_st *)ctx;
@@ -300,13 +307,15 @@ int ielb_ioux_lnew_us(void *ctx, union iel_arg_un flags) {
     pud->ring_fd = io_uring_setup(QUEUE_DEPTH, &p);
     if (setup_trapped) {
         perror("io_uring_setup (blocked by SECCOMP_RET_TRAP)");
-        return 1;
+        goto fail;
     }
     if (pud->ring_fd < 0) {
         perror("io_uring_setup");
-        return 1;
+        goto fail;
     } else
         fprintf(stderr, "io_uring_setup returned %d\n", pud->ring_fd);
+    if (!(p.features & (IORING_FEAT_NODROP | IORING_FEAT_RW_CUR_POS)))
+        goto fail_closefd;
 
     /*
      * io_uring communication happens via 2 shared kernel-user space ring
@@ -379,7 +388,7 @@ int ielb_ioux_lnew_us(void *ctx, union iel_arg_un flags) {
     pud->cring_mask = *PTR_OFFSET_CAST(pud->mapptr_cq, p.cq_off.ring_mask, unsigned);
     pud->cqes = PTR_OFFSET(pud->mapptr_cq, p.cq_off.cqes);
 
-    if (iel_que_init(&pud->taskque, 0) < 0) {
+    if (iel_quep_init(&pud->taskque, 0) < 0) {
         goto fail_unmapsqes;
     }
 
@@ -395,6 +404,7 @@ fail_unmapsq:;
     munmap(pud->mapptr_sq, pud->maplen_sq);
 fail_closefd:;
     close(pud->ring_fd);
+fail:;
     return 1;
 }
 static
@@ -461,7 +471,7 @@ int ielb_iou_lnew(void *ctx, union iel_arg_un flags) {
 }
 void ielb_iou_ldel(void *ctx) {
     struct iel_iou_ctx_st *pud = (struct iel_iou_ctx_st *)ctx;
-    iel_que_del(&pud->taskque);
+    iel_quep_del(&pud->taskque);
     munmap(pud->mapptr_sqes, pud->maplen_sqes);
     munmap(pud->mapptr_sq, pud->maplen_sq);
     if (pud->mapptr_cq != pud->mapptr_sq)
@@ -542,7 +552,7 @@ unsigned char ielb_iou_vtsetup(struct iel_vtable_st *vt) {
         SETUP_VTABLE_NAME(lnew);
         // Android (app) uses SECCOMP_RET_TRAP (syscall ret 64), and docker uses SECCOMP_RET_ERRNO | EPERM (or lsm?)
         // doesn't work for SECCOMP_RET_KILL_PROCESS
-        // Note: the  use of SECCOMP_RET_KILL_THREAD to kill a single thread in a multithreaded process is likely to leave the process in a permanently inconsistent and possibly corrupt state.
+        // Note: the use of SECCOMP_RET_KILL_THREAD to kill a single thread in a multithreaded process is likely to leave the process in a permanently inconsistent and possibly corrupt state.
 
     }
 #undef SETUP_VTABLE_NAME
@@ -551,4 +561,3 @@ unsigned char ielb_iou_vtsetup(struct iel_vtable_st *vt) {
     return IEL_VTSETUP_RET_UNSURE;
 #endif /* ifndef __linux__ */
 }
-

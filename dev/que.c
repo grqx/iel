@@ -2,7 +2,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 
-#include <iel/que.h>
+#include <iel_priv/quep.h>
 
 static inline
 void *tmalloc(size_t sz) {
@@ -53,7 +53,7 @@ static inline
 void pque(struct iel_que_st *que) {
     printf("(struct iel_que_st) { .map=%p, .mapcap=%zu, .chunk_s=%zu, .os_s=%hu, .chunk_e=%zu, .os_e=%hu }\nmap: [", que->map, que->mapcap, que->chunk_s, que->os_s, que->chunk_e, que->os_e);
     for (iel_que_sz i = 0; i < que->mapcap; ++i) {
-        printf("%p; ", que->map[i]);
+        printf("%p; ", ((void ***)que->map)[i]);
     }
     puts("]");
 }
@@ -61,42 +61,42 @@ void pque(struct iel_que_st *que) {
 int main(void) {
     struct iel_que_st que;
     int res;
-    res = iel_que_init(&que, 0);
+    res = iel_quep_init(&que, 0);
     if (res < 0) return 1;
     pque(&que);
-    iel_que_trim(&que);
+    iel_quep_trim(&que);
     puts("trimmed0");
     pque(&que);
     for (int j = 0; j < 3; ++j) {
-        printf("sz: %zu\n", iel_que_size(&que));
+        printf("sz: %zu\n", iel_quep_size(&que));
         for (size_t i = 0; i < 33; ++i) {
-            res = iel_que_push1(&que, (iel_que_elem)(uintptr_t)i);
+            res = iel_quep_push1(&que, (void *)(uintptr_t)i);
             if (res < 0) return 2;
         }
         pque(&que);
-        printf("sz: %zu\n", iel_que_size(&que));
+        printf("sz: %zu\n", iel_quep_size(&que));
         for (size_t i = 0; i < 32; ++i) {
-            iel_que_elem vout;
-            res = iel_que_pop1(&que, &vout);
+            void *vout;
+            res = iel_quep_pop1(&que, &vout);
             if (res < 0) return 3;
-            printf("pop: %p; sz: %zu\n", vout, iel_que_size(&que));
+            printf("pop: %p; sz: %zu\n", vout, iel_quep_size(&que));
         }
         pque(&que);
-        iel_que_trim(&que);
+        iel_quep_trim(&que);
         puts("trimmed1");
         pque(&que);
     }
     while (1) {
-        iel_que_elem vout;
-        res = iel_que_pop1(&que, &vout);
+        void *vout;
+        res = iel_quep_pop1(&que, &vout);
         if (res < 0) break;
-        printf("pop: %p; sz: %zu\n", vout, iel_que_size(&que));
+        printf("pop: %p; sz: %zu\n", vout, iel_quep_size(&que));
     }
-    res = iel_que_push1(&que, (iel_que_elem)(uintptr_t)42);
-    iel_que_trim(&que);
+    res = iel_quep_push1(&que, (void *)(uintptr_t)42);
+    iel_quep_trim(&que);
     if (res < 0) return 4;
     puts("out");
     pque(&que);
-    iel_que_del(&que);
+    iel_quep_del(&que);
     return 0;
 }
