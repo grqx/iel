@@ -138,7 +138,7 @@ void IEL_QUE_IDENT(trim) (struct iel_que_st *que) {
     iel_que_sz sz = que->chunk_e - que->chunk_s;
     iel_que_sz mapcap_new;
     if (que->os_e) {  // chunk_e allocated
-        if (sz || que->os_e != que->os_s)  // one or more chunk allocated
+        if (sz || que->os_e != que->os_s)  // one or more chunks allocated
             ++sz;
         else {  // free allocated empty chunk
             free(IEL_QUE_MAPOF(que)[que->chunk_e]);
