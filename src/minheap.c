@@ -11,7 +11,7 @@ struct iel_mh_node_st {
 };
 
 int iel_mh_init(struct iel_mh_st *mh, iel_mh_sz initlen) {
-    mh->arr = malloc(initlen * sizeof(struct iel_mh_node_st));
+    mh->arr = (struct iel_mh_node_st *)malloc(initlen * sizeof(struct iel_mh_node_st));
     if (!mh->arr)
         return -1;
     mh->entries = 0;
@@ -103,7 +103,7 @@ int iel_mh_ins1(struct iel_mh_st *mh, iel_mh_elem k, union iel_arg_un v) {
     iel_mh_sz new_sz = mh->entries + 1;
     if (new_sz > mh->maxentries) {  /* extend */
         iel_mh_sz new_maxsz = mh->maxentries << 1;
-        struct iel_mh_node_st *p = realloc(mh->arr, new_maxsz * sizeof(struct iel_mh_node_st));
+        struct iel_mh_node_st *p = (struct iel_mh_node_st *)realloc(mh->arr, new_maxsz * sizeof(struct iel_mh_node_st));
         if (!p)
             return -1;
         mh->arr = p;

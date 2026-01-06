@@ -1,16 +1,31 @@
 #ifndef IEL_BACKENDS_H_
 #define IEL_BACKENDS_H_
 
+#include <stdalign.h>
+#include <stddef.h>
+
 #include <iel/platform.h>
 #include <iel/arg.h>
 
 struct iel_cb_base;
-typedef void (*iel_cb)(struct iel_cb_base *, int);
+typedef int iel_taskres;
+typedef void (*iel_cb)(void *, iel_taskres);
 typedef struct iel_cb_base {
-    iel_cb cb;
+    alignas(alignof(max_align_t)) iel_cb cb;
 } *iel_cbp;
 
-// The backend will be available, p_lnew must always succeed unless there is a logic error in user code
+#define IEL_CB_ALIGN alignof(struct iel_cb_base)
+
+/* be_vt must be a valid struct iel_vtable_st
+ * Use as: IEL_RESOLVE_CALL(fpr,iou,iou_vt)(...)
+ */
+#ifdef IEL_USE_STABLE /* we don't need config.h for that */
+#define IEL_RESOLVE_CALL(be_vt,backend,func) ((be_vt).p_ ## func)
+#else
+#define IEL_RESOLVE_CALL(be_vt,backend,func) ielb_ ## backend ## _ ## func
+#endif
+
+// The backend will be available, p_lnew is expected to succeed
 #define IEL_VTSETUP_RET_AVAIL ((unsigned char) '\x00')
 // The backend will be unavailable, p_lnew must always fail
 #define IEL_VTSETUP_RET_UNAVAIL ((unsigned char) '\x01')
@@ -19,22 +34,22 @@ typedef struct iel_cb_base {
 // The user made a logic error when calling the vtsetup function
 #define IEL_VTSETUP_RET_ERROR ((unsigned char) '\xff')
 
-typedef void (*iel_fnptr_fpr)(void *ctx, iel_pf_fd fd, const unsigned char *buf, size_t count, iel_pf_pos offset, union iel_arg_un flags, iel_cbp cbp);
-typedef void (*iel_fnptr_fprv)(void *ctx, iel_pf_fd fd, iel_pf_iov *iovecs, size_t iovlen, iel_pf_pos offset, union iel_arg_un flags, iel_cbp cbp);
-typedef void (*iel_fnptr_fpw)(void *ctx, iel_pf_fd fd, const unsigned char *buf, size_t count, iel_pf_pos offset, union iel_arg_un flags, iel_cbp cbp);
-typedef void (*iel_fnptr_fpwv)(void *ctx, iel_pf_fd fd, iel_pf_iov *iovecs, size_t iovlen, iel_pf_pos offset, union iel_arg_un flags, iel_cbp cbp);
-typedef void (*iel_fnptr_fr)(void *ctx, iel_pf_fd fd, const unsigned char *buf, size_t count, union iel_arg_un flags, iel_cbp cbp);
-typedef void (*iel_fnptr_frv)(void *ctx, iel_pf_fd fd, iel_pf_iov *iov, size_t iovcnt, union iel_arg_un flags, iel_cbp cbp);
-typedef void (*iel_fnptr_fw)(void *ctx, iel_pf_fd fd, const unsigned char *buf, size_t count, union iel_arg_un flags, iel_cbp cbp);
-typedef void (*iel_fnptr_fwv)(void *ctx, iel_pf_fd fd, iel_pf_iov *iov, size_t iovcnt, union iel_arg_un flags, iel_cbp cbp);
+typedef void *(*iel_fnptr_fpr)(void *ctx, iel_pf_fd fd, const unsigned char *buf, size_t count, iel_pf_pos offset, union iel_arg_un flags, void *cbp);
+typedef void *(*iel_fnptr_fprv)(void *ctx, iel_pf_fd fd, iel_pf_iov *iovecs, size_t iovlen, iel_pf_pos offset, union iel_arg_un flags, void *cbp);
+typedef void *(*iel_fnptr_fpw)(void *ctx, iel_pf_fd fd, const unsigned char *buf, size_t count, iel_pf_pos offset, union iel_arg_un flags, void *cbp);
+typedef void *(*iel_fnptr_fpwv)(void *ctx, iel_pf_fd fd, iel_pf_iov *iovecs, size_t iovlen, iel_pf_pos offset, union iel_arg_un flags, void *cbp);
+typedef void *(*iel_fnptr_fr)(void *ctx, iel_pf_fd fd, const unsigned char *buf, size_t count, union iel_arg_un flags, void *cbp);
+typedef void *(*iel_fnptr_frv)(void *ctx, iel_pf_fd fd, iel_pf_iov *iov, size_t iovcnt, union iel_arg_un flags, void *cbp);
+typedef void *(*iel_fnptr_fw)(void *ctx, iel_pf_fd fd, const unsigned char *buf, size_t count, union iel_arg_un flags, void *cbp);
+typedef void *(*iel_fnptr_fwv)(void *ctx, iel_pf_fd fd, iel_pf_iov *iov, size_t iovcnt, union iel_arg_un flags, void *cbp);
 
-typedef void (*iel_fnptr_sr)(void *ctx, iel_pf_sockfd fd, const unsigned char *buf, size_t count, union iel_arg_un flags, iel_cbp cbp);
-typedef void (*iel_fnptr_srv)(void *ctx, iel_pf_sockfd fd, iel_pf_iov *iov, size_t iovcnt, union iel_arg_un flags, iel_cbp cbp);
-typedef void (*iel_fnptr_sw)(void *ctx, iel_pf_sockfd fd, const unsigned char *buf, size_t count, union iel_arg_un flags, iel_cbp cbp);
-typedef void (*iel_fnptr_swv)(void *ctx, iel_pf_sockfd fd, iel_pf_iov *iov, size_t iovcnt, union iel_arg_un flags, iel_cbp cbp);
+typedef void *(*iel_fnptr_sr)(void *ctx, iel_pf_sockfd fd, const unsigned char *buf, size_t count, union iel_arg_un flags, void *cbp);
+typedef void *(*iel_fnptr_srv)(void *ctx, iel_pf_sockfd fd, iel_pf_iov *iov, size_t iovcnt, union iel_arg_un flags, void *cbp);
+typedef void *(*iel_fnptr_sw)(void *ctx, iel_pf_sockfd fd, const unsigned char *buf, size_t count, union iel_arg_un flags, void *cbp);
+typedef void *(*iel_fnptr_swv)(void *ctx, iel_pf_sockfd fd, iel_pf_iov *iov, size_t iovcnt, union iel_arg_un flags, void *cbp);
 
-typedef void (*iel_fnptr_etime)(void *ctx, unsigned long long time, union iel_arg_un flags, iel_cbp cbp);
-typedef void (*iel_fnptr_esoon)(void *ctx, union iel_arg_un flags, iel_cbp cbp);
+typedef void *(*iel_fnptr_etime)(void *ctx, unsigned long long time, union iel_arg_un flags, void *cbp);
+typedef void *(*iel_fnptr_esoon)(void *ctx, union iel_arg_un flags, void *cbp);
 
 typedef size_t (*iel_fnptr_lsize)(void);
 typedef int (*iel_fnptr_lnew)(void *ctx, union iel_arg_un flags);
@@ -112,7 +127,7 @@ struct iel_vtable_st {
  */
 #define IEL_FLAG_ETIME_MICROS (1ULL << 63)
 /* Applies to: fp series, f series, s series, p_etime
- * Available when: WIP
+ * Available when: false
  * Makes the task multishot
  * TODO: allow cancelling? and implementation
  */

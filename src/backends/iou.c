@@ -1,6 +1,4 @@
 // TODO: verify iel_arg_un flags is empty
-// TODO: return handle or error to allow cancelling
-// TODO: queue
 #define _DEFAULT_SOURCE
 #include <pthread.h>
 #include <time.h>
@@ -13,6 +11,7 @@
 #include <sys/uio.h>
 #include <unistd.h>
 
+#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdatomic.h>
@@ -24,10 +23,12 @@
 #include <iel/arg.h>
 #include <iel/backends.h>
 #include <iel/backends/iou.h>
+#include <iel/tagptr.h>
+#include <iel/errno.h>
 #include <iel_priv/quep.h>
 
 #define IEL_QUE_IMPL
-#define IEL_QUE_TPL (/*ChunkEntsBit=*/6, /*MinChunks=*/8, /*type=*/struct io_uring_sqe, /*pfx=*/ielb_ioux_xsq_, /*sfx=*/, /*api=*/static inline)
+#define IEL_QUE_TPL (/*ChunkEntsBit=*/6, /*MinChunks=*/8, /*type=*/struct io_uring_sqe, /*pfx=*/ielb_ioux_xsq_, /*sfx=*/, /*api=*/static inline, /*align=*/64,)
 #include <iel_priv/que.tpl.h>
 
 static inline
@@ -54,9 +55,9 @@ void pu64hx(const char *hint, size_t hintlen, unsigned long long i, char e) {
     write(STDERR_FILENO, str, 19);
 }
 
+// Non-SQPOLL saturates at 64, 128 is better for SQPOLL
 #define QUEUE_DEPTH 64
-#define PTR_OFFSET_CAST(voidp, os, typ) ((typ *)((unsigned char *)voidp + os))
-#define PTR_OFFSET(voidp, os) PTR_OFFSET_CAST(voidp, os, void)
+#define PTR_OFFSET(voidp, os, typ) ((typ)((unsigned char *)voidp + os))
 
 #define ld_rlx(atomic_p) atomic_load_explicit(atomic_p, memory_order_relaxed)
 #define ld_acq(atomic_p) atomic_load_explicit(atomic_p, memory_order_acquire)
@@ -64,22 +65,23 @@ void pu64hx(const char *hint, size_t hintlen, unsigned long long i, char e) {
 #define st_rel(atomic_p, new_val) atomic_store_explicit(atomic_p, new_val, memory_order_release)
 
 // read mostly
-struct iel_iou_ctx_st {
+struct ielb_iou_ctx_st {
     // ----- hot -----
     // Submission ring pointers
-    unsigned _Atomic *sring_tail;  // R,W; release
-    unsigned _Atomic const *sring_head;  // R; acquire
+    _Atomic(unsigned) *sring_tail;  // *R,W; release
+    _Atomic(unsigned) const *sring_head;  // R; acquire
     unsigned *sring_array;  // W+os
     struct io_uring_sqe *mapptr_sqes;  // W+os
     // Completion ring pointers
-    unsigned _Atomic *cring_head;  // R,W; release
-    unsigned _Atomic const *cring_tail;  // R; acquire
+    _Atomic(unsigned) *cring_head;  // *R,W; release
+    _Atomic(unsigned) const *cring_tail;  // R; acquire
     struct io_uring_cqe const *cqes;  // R+os
     // other data
     unsigned cring_mask;
     unsigned sring_mask;
     // ----- CACHELINE -----
-    struct iel_que_st taskque;
+    struct iel_que_st taskque; // TODO: confirm soon semantics
+    struct iel_que_st sqofq;  // Submission Queue overflow queue
     // ----- cold(SQPOLL) -----
     int ring_fd;
     // ----- cold(NORM) -----
@@ -90,8 +92,11 @@ struct iel_iou_ctx_st {
     void *mapptr_sq;
     void *mapptr_cq;
 };
-// #define PEXPR(x) static char (*__kaboom ## __COUNTER__)[x] = 1;
-// PEXPR(sizeof(struct iel_iou_ctx_st))
+
+static_assert(
+    sizeof(struct ielb_iou_ctx_st) == ielb_iou_lsize(),
+    "struct ielb_iou_ctx_st size mismatch! "
+    "Update ielb_iou_lsize() in include/iel/backends/iou.h");
 
 /*
 * System call wrappers provided since glibc does not yet
@@ -118,116 +123,145 @@ int io_uring_enter(int ring_fd, unsigned int to_submit,
 * Submit a read or a write request to the submission queue.
 * */
 static inline
-void submit_to_sq(struct iel_iou_ctx_st *pud, unsigned char op, int fd, long long off, unsigned long long addr, unsigned int len, iel_cbp cbp) {
+void *submit_to_sq(struct ielb_iou_ctx_st *pud, unsigned char op, int fd, long long off, unsigned long long addr, unsigned int len, void *user_data) {
     // TODO: handle CQ overflow/-EBUSY? see IORING_FEAT_NODROP in io_uring_setup(2)
     unsigned index, tail;
 
     /* Add our submission queue entry to the tail of the SQE ring buffer */
-    tail = ld_rlx(pud->sring_tail);
+    tail = *pud->sring_tail;
     unsigned sq_ents = (unsigned)(tail - ld_acq(pud->sring_head));
+    struct io_uring_sqe *sqe;
     if (sq_ents == pud->sring_mask + 1) {  // maybe replace with actual size? should be equivalent though
+        // sqe = ielb_ioux_xsq_rsv1(&pud->sqofq);
         fprintf(stderr, "unexpected sq full!\n");
-        abort();
+        // TODO: actually use the queue
+        // TODO: don't flush submission until end of loop, unless SQPOLL(?)
+        iel_errno = IEL_ENOMEM;
+        return NULL;
     } else
         fprintf(stderr, "pushing event into sq, current size: %u\n", sq_ents);
     index = tail & pud->sring_mask;
-    struct io_uring_sqe *sqe = &pud->mapptr_sqes[index];
+    sqe = &pud->mapptr_sqes[index];
     /* Fill in the parameters required );for the read or write operation */
     sqe->opcode = op;
     sqe->fd = fd;
     sqe->addr = addr;
     sqe->len = len;
     sqe->off = (unsigned long long)off;
-    sqe->user_data = (unsigned long long)cbp;
+    sqe->user_data = (unsigned long long)user_data;
 
     pud->sring_array[index] = index;
 
     /* Update the tail */
     st_rel(pud->sring_tail, tail + 1);
+    return user_data;
 }
 
 
-void ielb_iou_fpr(void *ctx, iel_pf_fd fd, const unsigned char *buf, size_t count, iel_pf_pos offset, union iel_arg_un flags, iel_cbp cbp) {
+void *ielb_iou_fpr(void *ctx, iel_pf_fd fd, const unsigned char *buf, size_t count, iel_pf_pos offset, union iel_arg_un flags, void *cbp) {
     (void) flags;
-    submit_to_sq((struct iel_iou_ctx_st *)ctx, IORING_OP_READ, fd, offset, (unsigned long long)buf, count, cbp);
+    return submit_to_sq((struct ielb_iou_ctx_st *)ctx, IORING_OP_READ, fd, offset, (unsigned long long)buf, count, cbp);
 }
-void ielb_iou_fprv(void *ctx, iel_pf_fd fd, iel_pf_iov *iovecs, size_t iovlen, iel_pf_pos offset, union iel_arg_un flags, iel_cbp cbp) {
+void *ielb_iou_fprv(void *ctx, iel_pf_fd fd, iel_pf_iov *iovecs, size_t iovlen, iel_pf_pos offset, union iel_arg_un flags, void *cbp) {
     (void) flags;
-    submit_to_sq((struct iel_iou_ctx_st *)ctx, IORING_OP_READV, fd, offset, (unsigned long long)iovecs, iovlen, cbp);
+    return submit_to_sq((struct ielb_iou_ctx_st *)ctx, IORING_OP_READV, fd, offset, (unsigned long long)iovecs, iovlen, cbp);
 }
-void ielb_iou_fpw(void *ctx, iel_pf_fd fd, const unsigned char *buf, size_t count, iel_pf_pos offset, union iel_arg_un flags, iel_cbp cbp) {
+void *ielb_iou_fpw(void *ctx, iel_pf_fd fd, const unsigned char *buf, size_t count, iel_pf_pos offset, union iel_arg_un flags, void *cbp) {
     (void) flags;
-    submit_to_sq((struct iel_iou_ctx_st *)ctx, IORING_OP_WRITE, fd, offset, (unsigned long long)buf, count, cbp);
+    return submit_to_sq((struct ielb_iou_ctx_st *)ctx, IORING_OP_WRITE, fd, offset, (unsigned long long)buf, count, cbp);
 }
-void ielb_iou_fpwv(void *ctx, iel_pf_fd fd, iel_pf_iov *iovecs, size_t iovlen, iel_pf_pos offset, union iel_arg_un flags, iel_cbp cbp) {
+void *ielb_iou_fpwv(void *ctx, iel_pf_fd fd, iel_pf_iov *iovecs, size_t iovlen, iel_pf_pos offset, union iel_arg_un flags, void *cbp) {
     (void) flags;
-    submit_to_sq((struct iel_iou_ctx_st *)ctx, IORING_OP_WRITEV, fd, offset, (unsigned long long)iovecs, iovlen, cbp);
+    return submit_to_sq((struct ielb_iou_ctx_st *)ctx, IORING_OP_WRITEV, fd, offset, (unsigned long long)iovecs, iovlen, cbp);
 }
 
-void ielb_ioux_r(void *ctx, iel_pf_fd fd, const unsigned char *buf, size_t count, union iel_arg_un flags, iel_cbp cbp) {
+void *ielb_ioux_r(void *ctx, iel_pf_fd fd, const unsigned char *buf, size_t count, union iel_arg_un flags, void *cbp) {
     (void) flags;
-    submit_to_sq((struct iel_iou_ctx_st *)ctx, IORING_OP_READ, fd, (unsigned long long)-1, (unsigned long long)buf, count, cbp);
+    return submit_to_sq((struct ielb_iou_ctx_st *)ctx, IORING_OP_READ, fd, (unsigned long long)-1, (unsigned long long)buf, count, cbp);
 }
-void ielb_ioux_rv(void *ctx, iel_pf_fd fd, iel_pf_iov *iov, size_t iovcnt, union iel_arg_un flags, iel_cbp cbp) {
+void *ielb_ioux_rv(void *ctx, iel_pf_fd fd, iel_pf_iov *iov, size_t iovcnt, union iel_arg_un flags, void *cbp) {
     (void) flags;
-    submit_to_sq((struct iel_iou_ctx_st *)ctx, IORING_OP_READV, fd, (unsigned long long)-1, (unsigned long long)iov, iovcnt, cbp);
+    return submit_to_sq((struct ielb_iou_ctx_st *)ctx, IORING_OP_READV, fd, (unsigned long long)-1, (unsigned long long)iov, iovcnt, cbp);
 }
-void ielb_ioux_w(void *ctx, iel_pf_fd fd, const unsigned char *buf, size_t count, union iel_arg_un flags, iel_cbp cbp) {
+void *ielb_ioux_w(void *ctx, iel_pf_fd fd, const unsigned char *buf, size_t count, union iel_arg_un flags, void *cbp) {
     (void) flags;
-    submit_to_sq((struct iel_iou_ctx_st *)ctx, IORING_OP_WRITE, fd, (unsigned long long)-1, (unsigned long long)buf, count, cbp);
+    return submit_to_sq((struct ielb_iou_ctx_st *)ctx, IORING_OP_WRITE, fd, (unsigned long long)-1, (unsigned long long)buf, count, cbp);
 }
-void ielb_ioux_wv(void *ctx, iel_pf_fd fd, iel_pf_iov *iov, size_t iovcnt, union iel_arg_un flags, iel_cbp cbp) {
+void *ielb_ioux_wv(void *ctx, iel_pf_fd fd, iel_pf_iov *iov, size_t iovcnt, union iel_arg_un flags, void *cbp) {
     (void) flags;
-    submit_to_sq((struct iel_iou_ctx_st *)ctx, IORING_OP_WRITEV, fd, (unsigned long long)-1, (unsigned long long)iov, iovcnt, cbp);
+    return submit_to_sq((struct ielb_iou_ctx_st *)ctx, IORING_OP_WRITEV, fd, (unsigned long long)-1, (unsigned long long)iov, iovcnt, cbp);
 }
 
 struct ielb_ioux_etime_cbt {
     struct iel_cb_base base;
-    struct timespec *ts;
-    iel_cbp cbp;
+    struct timespec ts;
+    void *user_data;
 };
 
 static
-void ielb_ioux_etime_cb(iel_cbp _self, int res) {
+void ielb_ioux_etime_cb(void *_self, int res) {
     struct ielb_ioux_etime_cbt *cbp = (struct ielb_ioux_etime_cbt *)_self;
-    iel_cbp cbp_inner = cbp->cbp;
+    void *user_data = cbp->user_data;
+    iel_cbp cbp_inner;
+    uintmax_t unused;
 
-    free(cbp->ts);
+    cbp_inner = (iel_cbp)iel_tagptr_untag(user_data, IEL_CB_ALIGN, &unused);
+
     free(cbp);
-    cbp_inner->cb(cbp_inner, res == -ETIME ? 0 : res);
+    cbp_inner->cb(user_data, res == -ETIME ? 0 : res);
 }
 
-void ielb_iou_etime(void *ctx, unsigned long long time, union iel_arg_un flags, iel_cbp cbp) {
-    struct iel_iou_ctx_st *pud = (struct iel_iou_ctx_st *)ctx;
-    struct timespec *pts = malloc(sizeof(struct timespec));
+void *ielb_iou_etime(void *ctx, unsigned long long time, union iel_arg_un flags, void *user_data) {
+    struct ielb_iou_ctx_st *pud = (struct ielb_iou_ctx_st *)ctx;
+    struct ielb_ioux_etime_cbt *wcbp = (struct ielb_ioux_etime_cbt *)malloc(sizeof(struct ielb_ioux_etime_cbt));
+    if (!wcbp) {
+        iel_cbp cbp;
+        uintmax_t unused;
+
+        cbp = (iel_cbp)iel_tagptr_untag(user_data, IEL_CB_ALIGN, &unused);
+        cbp->cb(user_data, -ENOMEM);
+        iel_errno = IEL_ENOMEM;
+        return NULL;
+    }
     if (flags.ull & IEL_FLAG_ETIME_MICROS) {
         flags.ull &= ~IEL_FLAG_ETIME_MICROS;
-        pts->tv_sec = time / 1000000;
-        pts->tv_nsec = (time % 1000000) * 1000;
+        wcbp->ts.tv_sec = time / 1000000;
+        wcbp->ts.tv_nsec = (time % 1000000) * 1000;
     } else {
-        pts->tv_sec = time / 1000;
-        pts->tv_nsec = (time % 1000) * 1000000;
+        wcbp->ts.tv_sec = time / 1000;
+        wcbp->ts.tv_nsec = (time % 1000) * 1000000;
     }
     if (flags.ull) {
-        cbp->cb(cbp, -EINVAL);
-        free(pts);
-        return;
-    }
-    {
-        struct ielb_ioux_etime_cbt *wcbp = malloc(sizeof(struct ielb_ioux_etime_cbt));
+        iel_cbp cbp;
+        uintmax_t unused;
 
-        wcbp->base.cb = ielb_ioux_etime_cb;
-        wcbp->ts = pts;
-        wcbp->cbp = cbp;
-
-        submit_to_sq(pud, IORING_OP_TIMEOUT, 0, 0, (unsigned long long) pts, 1, &wcbp->base);
+        free(wcbp);
+        cbp = (iel_cbp)iel_tagptr_untag(user_data, IEL_CB_ALIGN, &unused);
+        cbp->cb(user_data, -EINVAL);
+        iel_errno = IEL_EINVAL;
+        return NULL;
     }
+    wcbp->base.cb = &ielb_ioux_etime_cb;
+    wcbp->user_data = user_data;
+
+    return submit_to_sq(pud, IORING_OP_TIMEOUT, 0, 0, (unsigned long long)&wcbp->ts, 1, &wcbp->base);
 }
 
-void ielb_iou_esoon(void *ctx, union iel_arg_un flags, iel_cbp cbp) {
+void *ielb_iou_esoon(void *ctx, union iel_arg_un flags, void *user_data) {
     (void) flags;
-    struct iel_iou_ctx_st *pud = (struct iel_iou_ctx_st *)ctx;
-    iel_quep_push1(&pud->taskque, cbp);
+    struct ielb_iou_ctx_st *pud = (struct ielb_iou_ctx_st *)ctx;
+    void **pout = iel_quep_rsv1(&pud->taskque);
+    if (!pout) {
+        iel_cbp cbp;
+        uintmax_t unused;
+
+        cbp = (iel_cbp)iel_tagptr_untag(user_data, IEL_CB_ALIGN, &unused);
+        cbp->cb(user_data, -ENOMEM);
+        iel_errno = IEL_ENOMEM;
+        return NULL;
+    }
+    *pout = user_data;
+    return user_data;
 }
 
 static inline
@@ -244,13 +278,13 @@ void ielb_ioux_drainque(struct iel_que_st *que) {
 
 int ielb_iou_lrun1(void *ctx, union iel_arg_un flags) {
     (void) flags;
-    struct iel_iou_ctx_st *pud = (struct iel_iou_ctx_st *)ctx;
-    unsigned head;
+    struct ielb_iou_ctx_st *pud = (struct ielb_iou_ctx_st *)ctx;
+    unsigned chead;
     unsigned sq_len;
     ielb_ioux_drainque(&pud->taskque);
 
     // relaxed because no synchronisation needed
-    sq_len = ld_rlx(pud->sring_tail) - ld_rlx(pud->sring_head);
+    sq_len = *pud->sring_tail - ld_acq(pud->sring_head);
     fprintf(stderr, "awaiting submission of %u SQEs and completion of 1 event\n", sq_len);
     /*
     * Tell the kernel we have submitted events with the io_uring_enter()
@@ -265,32 +299,36 @@ int ielb_iou_lrun1(void *ctx, union iel_arg_un flags) {
         return ret;
     }
 
-    head = ld_rlx(pud->cring_head);
-    fprintf(stderr, "reading from cq %u entries\n", ld_acq(pud->cring_tail) - head);
+    chead = *pud->cring_head;
+    fprintf(stderr, "reading from cq %u entries\n", ld_acq(pud->cring_tail) - chead);
 
     /*
     * Remember, this is a ring buffer. If head == tail, it means that the
     * buffer is empty.
     * */
-    while (head != ld_acq(pud->cring_tail)) {
+    while (1) {
         /* Get the entry */
-        struct io_uring_cqe const *cqe = &pud->cqes[head & pud->cring_mask];
+        struct io_uring_cqe const *cqe = &pud->cqes[chead & pud->cring_mask];
 
-        iel_cbp cbp = (iel_cbp)cqe->user_data;
-        if (cbp)
-            cbp->cb(cbp, cqe->res);
+        if (cqe->user_data) {
+            iel_cbp cbp;
+            uintmax_t unused;
+
+            cbp = (iel_cbp)iel_tagptr_untag((void *)cqe->user_data, IEL_CB_ALIGN, &unused);
+            cbp->cb((void *)cqe->user_data, cqe->res);
+        }
 
         /* Write barrier so that update to the head are made visible */
-        st_rel(pud->cring_head, ++head);
+        st_rel(pud->cring_head, ++chead);
 
-        if (head == ld_acq(pud->cring_tail)) break;
+        if (chead == ld_acq(pud->cring_tail)) break;
 
         ielb_ioux_drainque(&pud->taskque);
     }
     return 0;
 }
-size_t ielb_iou_lsize(void) {
-    return sizeof(struct iel_iou_ctx_st);
+size_t (ielb_iou_lsize)(void) {
+    return sizeof(struct ielb_iou_ctx_st);
 }
 
 static
@@ -298,14 +336,16 @@ volatile sig_atomic_t setup_trapped = 0;
 
 int ielb_ioux_lnew_us(void *ctx, union iel_arg_un flags) {
     (void) flags;
-    struct iel_iou_ctx_st *pud = (struct iel_iou_ctx_st *)ctx;
+    struct ielb_iou_ctx_st *pud = (struct ielb_iou_ctx_st *)ctx;
     struct io_uring_params p;
+    int sring_sz, cring_sz;
 
     /* See io_uring_setup(2) for io_uring_params.flags you can set */
     memset(&p, 0, sizeof(p));
     setup_trapped = 0;
     pud->ring_fd = io_uring_setup(QUEUE_DEPTH, &p);
     if (setup_trapped) {
+        // TODO: handle errors
         perror("io_uring_setup (blocked by SECCOMP_RET_TRAP)");
         goto fail;
     }
@@ -326,8 +366,8 @@ int ielb_ioux_lnew_us(void *ctx, union iel_arg_un flags) {
     // TODO: support SQE128?
     // TODO: SQPOLL
     pud->maplen_sqes = p.sq_entries * sizeof(struct io_uring_sqe);
-    int sring_sz = p.sq_off.array + p.sq_entries * sizeof(unsigned);
-    int cring_sz = p.cq_off.cqes + p.cq_entries * sizeof(struct io_uring_cqe);
+    sring_sz = p.sq_off.array + p.sq_entries * sizeof(unsigned);
+    cring_sz = p.cq_off.cqes + p.cq_entries * sizeof(struct io_uring_cqe);
 
     /* Rather than check for kernel version, the recommended way is to
      * check the features field of the io_uring_params structure, which is a
@@ -368,13 +408,13 @@ int ielb_ioux_lnew_us(void *ctx, union iel_arg_un flags) {
     }
 
     /* Save useful fields for later easy reference */
-    pud->sring_head = PTR_OFFSET(pud->mapptr_sq, p.sq_off.head);
-    pud->sring_tail = PTR_OFFSET(pud->mapptr_sq, p.sq_off.tail);
-    pud->sring_mask = *PTR_OFFSET_CAST(pud->mapptr_sq, p.sq_off.ring_mask, unsigned);
-    pud->sring_array = PTR_OFFSET(pud->mapptr_sq, p.sq_off.array);
+    pud->sring_tail = PTR_OFFSET(pud->mapptr_sq, p.sq_off.tail, _Atomic(unsigned) *);
+    pud->sring_head = PTR_OFFSET(pud->mapptr_sq, p.sq_off.head, _Atomic(unsigned) const *);
+    pud->sring_mask = *PTR_OFFSET(pud->mapptr_sq, p.sq_off.ring_mask, unsigned const *);
+    pud->sring_array = PTR_OFFSET(pud->mapptr_sq, p.sq_off.array, unsigned *);
 
     /* Map in the submission queue entries array */
-    pud->mapptr_sqes = mmap(0, pud->maplen_sqes,
+    pud->mapptr_sqes = (struct io_uring_sqe *)mmap(0, pud->maplen_sqes,
                    PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE,
                    pud->ring_fd, IORING_OFF_SQES);
     if (pud->mapptr_sqes == MAP_FAILED) {
@@ -383,18 +423,22 @@ int ielb_ioux_lnew_us(void *ctx, union iel_arg_un flags) {
     }
 
     /* Save useful fields for later easy reference */
-    pud->cring_head = PTR_OFFSET(pud->mapptr_cq, p.cq_off.head);
-    pud->cring_tail = PTR_OFFSET(pud->mapptr_cq, p.cq_off.tail);
-    pud->cring_mask = *PTR_OFFSET_CAST(pud->mapptr_cq, p.cq_off.ring_mask, unsigned);
-    pud->cqes = PTR_OFFSET(pud->mapptr_cq, p.cq_off.cqes);
+    pud->cring_head = PTR_OFFSET(pud->mapptr_cq, p.cq_off.head, _Atomic(unsigned) *);
+    pud->cring_tail = PTR_OFFSET(pud->mapptr_cq, p.cq_off.tail, _Atomic(unsigned) const *);
+    pud->cring_mask = *PTR_OFFSET(pud->mapptr_cq, p.cq_off.ring_mask, unsigned *);
+    pud->cqes = PTR_OFFSET(pud->mapptr_cq, p.cq_off.cqes, struct io_uring_cqe *);
 
-    if (iel_quep_init(&pud->taskque, 0) < 0) {
+    if (iel_quep_init(&pud->taskque, 0) < 0)
         goto fail_unmapsqes;
-    }
+
+    if (ielb_ioux_xsq_init(&pud->sqofq, 0) < 0)
+        goto fail_deltaskq;
 
     pud->feat = IEL_FEAT_AVAIL | IEL_FEAT_ETIME_MICROS;
 
     return 0;
+fail_deltaskq:;
+    iel_quep_del(&pud->taskque);
 fail_unmapsqes:;
     munmap(pud->mapptr_sqes, pud->maplen_sqes);
 fail_unmapcq:;
@@ -437,7 +481,7 @@ struct ielb_ioux_lnewt_arg {
 };
 static
 void *ielb_ioux_lnewt_cb(void *_arg) {
-    struct ielb_ioux_lnewt_arg *arg = _arg;
+    struct ielb_ioux_lnewt_arg *arg = (struct ielb_ioux_lnewt_arg *)_arg;
     struct sigaction sa = {
         .sa_sigaction = sigactcb,
         .sa_flags = SA_SIGINFO | SA_RESETHAND,
@@ -470,7 +514,8 @@ int ielb_iou_lnew(void *ctx, union iel_arg_un flags) {
     return arg.res;
 }
 void ielb_iou_ldel(void *ctx) {
-    struct iel_iou_ctx_st *pud = (struct iel_iou_ctx_st *)ctx;
+    struct ielb_iou_ctx_st *pud = (struct ielb_iou_ctx_st *)ctx;
+    ielb_ioux_xsq_del(&pud->sqofq);
     iel_quep_del(&pud->taskque);
     munmap(pud->mapptr_sqes, pud->maplen_sqes);
     munmap(pud->mapptr_sq, pud->maplen_sq);
@@ -482,10 +527,10 @@ union iel_arg_un ielb_iou_xcntl(void *ctx, unsigned short op, union iel_arg_un a
     (void) arg0;
     (void) arg1;
 
-    struct iel_iou_ctx_st *pud = (struct iel_iou_ctx_st *)ctx;
+    struct ielb_iou_ctx_st *pud = (struct ielb_iou_ctx_st *)ctx;
     switch (op) {
         case IELB_IOU_XCNTL_SQLEN:
-            return (union iel_arg_un) { .ull = (unsigned)(ld_rlx(pud->sring_tail) - ld_rlx(pud->sring_head)) };
+            return (union iel_arg_un) { .ull = (unsigned)(*pud->sring_tail - ld_acq(pud->sring_head)) };
         default:
             return (union iel_arg_un) { .ull = (unsigned long long) -1 };
     }
@@ -495,7 +540,7 @@ unsigned long long ielb_iou_cap = IEL_FEAT_AVAIL | IEL_FEAT_ETIME_MICROS;
 
 unsigned long long ielb_iou_xfeat(void *ctx, union iel_arg_un flags) {
     (void) flags;
-    struct iel_iou_ctx_st *pud = (struct iel_iou_ctx_st *)ctx;
+    struct ielb_iou_ctx_st *pud = (struct ielb_iou_ctx_st *)ctx;
     if (!ctx) return 0;
     return pud->feat;
 }
@@ -513,7 +558,7 @@ unsigned char ielb_iou_vtsetup(struct iel_vtable_st *vt) {
         errno = EINVAL;
         return IEL_VTSETUP_RET_ERROR;
     }
-#define SETUP_VTABLE_FN(x, y) vt->p_##x = ielb_iou_##y
+#define SETUP_VTABLE_FN(x, y) vt->p_##x = &ielb_iou_##y
 #define SETUP_VTABLE_NAME(x) SETUP_VTABLE_FN(x,x)
     SETUP_VTABLE_NAME(fpr);
     SETUP_VTABLE_NAME(fprv);
@@ -546,7 +591,7 @@ unsigned char ielb_iou_vtsetup(struct iel_vtable_st *vt) {
     int scmode = prctl(PR_GET_SECCOMP);
     // scmode won't be SECCOMP_MODE_STRICT since prctl would be blocked in that case
     if (scmode == SECCOMP_MODE_DISABLED) {
-        vt->p_lnew = ielb_ioux_lnew_us;
+        vt->p_lnew = &ielb_ioux_lnew_us;
     } else {
         fputs("SECCOMP_MODE_FILTER\n", stderr);
         SETUP_VTABLE_NAME(lnew);

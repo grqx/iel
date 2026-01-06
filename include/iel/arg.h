@@ -8,11 +8,14 @@ union iel_arg_un {
     void *ptr;
     iel_arg_fnptr fnptr;
 };
+
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
 #define IEL_ARG(x) _Generic(x, \
         unsigned long long: (union iel_arg_un) { .ull = (unsigned long long)x }, \
         void *: (union iel_arg_un) { .ptr = (void *)x }, \
         iel_arg_fnptr: (union iel_arg_un) { .fnptr = (iel_arg_fnptr)x } \
     )
+#endif
 
 #define IEL_ARG_NULL ((union iel_arg_un) { .ull = 0ULL })
 #define IEL_ARG_NULLPTR ((union iel_arg_un) { .ptr = NULL })
