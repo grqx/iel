@@ -1,0 +1,6 @@
+#cmakedefine01 IEL_HAVE_UNISTD_H
+#cmakedefine01 IEL_HAVE_POSIX2001_MEMALIGN
+#cmakedefine01 IEL_HAVE_ALIGNED_ALLOC
+#ifdef __aarch64__
+#cmakedefine01 IEL_AA64_HAVE_MTE
+#endif

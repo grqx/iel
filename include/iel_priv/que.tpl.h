@@ -1,6 +1,7 @@
 #ifdef IEL_QUE_TPL
 // #define IEL_QUE_TPL (/*ChunkEntsBit=*/, /*MinChunks=*/, /*type=*/, /*pfx=*/, /*sfx=*/, /*api=*/, /*align=*/,)
 
+#include <assert.h>
 #include <iel/config.h>
 #include <iel_priv/pp.h>
 IEL_PP_CHECK_ARGC(7, IEL_QUE_TPL)
@@ -13,19 +14,6 @@ IEL_PP_CHECK_ARGC(7, IEL_QUE_TPL)
 #define IEL_QUE_API IEL_QUE_GETARG(5)
 #define IEL_QUE_ALIGN IEL_QUE_GETARG(6)
 
-#ifndef IEL_PRIV_QUE_TPL_H_
-#define IEL_PRIV_QUE_TPL_H_
-
-#include <stddef.h>
-#include <stdint.h>
-#include <assert.h>
-
-typedef void *iel_que_gmap;
-
-typedef size_t iel_que_sz;
-typedef size_t iel_que_idx;
-
-typedef uint_least32_t iel_que_offset;
 static_assert(
     IEL_QUE_CHUNK_ENTS_BIT <= 32,
     "Too many elements in a chunk! Reduce ChunkEntsBit!");
@@ -33,19 +21,7 @@ static_assert(
     IEL_QUE_ALIGN <= sizeof(IEL_QUE_ELEM) &&
     sizeof(IEL_QUE_ELEM) % IEL_QUE_ALIGN == 0,
     "Invalid alignment requested!");
-
-struct iel_que_st {
-    /* array of pointers to chunks */
-    iel_que_gmap map;
-    /* map entries allocated */
-    iel_que_sz mapcap;
-    /* start/end chunk index in map */
-    iel_que_idx chunk_s, chunk_e;
-    /* start/end offset in chunk */
-    iel_que_offset os_s, os_e;
-};
-
-#endif /* ifndef IEL_PRIV_QUE_TPL_H_ */
+#include <iel/quedecl.h>
 
 /* Precondition: que */
 IEL_QUE_API IEL_FNATTR_NODISCARD
@@ -67,8 +43,8 @@ IEL_QUE_ELEM *IEL_QUE_IDENT(rsv1) (struct iel_que_st *que);
 IEL_QUE_API IEL_FNATTR_NODISCARD
 int IEL_QUE_IDENT(pop1) (struct iel_que_st *que, IEL_QUE_ELEM *vout);
 
-/* Precondition: que && blk_out && blk_sz, and que is initialised correctly */
-IEL_QUE_API IEL_FNATTR_NODISCARD
+/* Precondition: que && blk_out, and que is initialised correctly */
+IEL_QUE_API
 size_t IEL_QUE_IDENT(pop_to) (struct iel_que_st *que, IEL_QUE_ELEM *blk_out, size_t blk_sz);
 
 /* Precondition: que, and que is initialised correctly */
@@ -88,7 +64,7 @@ void IEL_QUE_IDENT(trim) (struct iel_que_st *que);
 #include <stdlib.h>
 #include <iel_priv/alloc.h>
 
-#define IEL_QUE_CHUNK_ENTS_MASK ((1ULL << IEL_QUE_CHUNK_ENTS_BIT) - 1ULL)
+#define IEL_QUE_CHUNK_ENTS_MASK ((1ULL << IEL_QUE_CHUNK_ENTS_BIT) - 1)
 #define IEL_QUE_CHUNK_SZ (sizeof(IEL_QUE_ELEM) << IEL_QUE_CHUNK_ENTS_BIT)
 #define IEL_QUE_MAPOF(que) ((IEL_QUE_ELEM **) que->map)
 #define IEL_QUE_MAPSZ4(cap) (cap * sizeof(IEL_QUE_ELEM *))
@@ -161,17 +137,18 @@ int IEL_QUE_IDENT(pop1) (struct iel_que_st *que, IEL_QUE_ELEM *vout) {
     return 0;
 }
 
-IEL_QUE_API IEL_FNATTR_NODISCARD
+#include <stdio.h>
+IEL_QUE_API
 size_t IEL_QUE_IDENT(pop_to) (struct iel_que_st *que, IEL_QUE_ELEM *blk_out, size_t blk_sz) {
     size_t sz = 0;
 
+    if (!blk_sz) return 0;
     while (1) {
         size_t span;
-        IEL_QUE_ELEM const * const restrict src = (IEL_QUE_ELEM const *)IEL_ASSUME_ALIGNED(
-            &IEL_QUE_MAPOF(que)[que->chunk_s][que->os_s], IEL_QUE_ALIGN);
         if (que->chunk_e == que->chunk_s) {  // last chunk
             span = que->os_e - que->os_s;
 
+            // TODO: unsafe variant where this branch is removed?
             if (!span) {  // empty, trim and return
 out_que_empty:;
                 if (que->os_e)  // chunk_e allocated
@@ -184,6 +161,8 @@ out_que_empty:;
             span = (1ULL << IEL_QUE_CHUNK_ENTS_BIT) - que->os_s;
         }
 
+        IEL_QUE_ELEM const * const restrict src = (IEL_QUE_ELEM const *)IEL_ASSUME_ALIGNED(
+            &IEL_QUE_MAPOF(que)[que->chunk_s][que->os_s], IEL_QUE_ALIGN);
         if (span >= blk_sz) {  // block exhausted, rare
             memcpy(blk_out, src, blk_sz * sizeof(IEL_QUE_ELEM));
             sz += blk_sz;

@@ -7,20 +7,21 @@
 #include <iel/backends.h>
 #include <iel/platform.h>
 #include <iel/arg.h>
+#include <iel/quedecl.h>
 
 IEL_STABLE_API
 unsigned char ielb_iou_vtsetup(struct iel_vtable_st *vt);
 
 struct ielb_iou_ctx_st;
 
-IEL_API
-void *ielb_iou_fpr(void *ctx, iel_pf_fd fd, const unsigned char *buf, size_t count, iel_pf_pos offset, union iel_arg_un flags, void *cbp);
-IEL_API
-void *ielb_iou_fprv(void *ctx, iel_pf_fd fd, iel_pf_iov *iovecs, size_t iovlen, iel_pf_pos offset, union iel_arg_un flags, void *cbp);
-IEL_API
-void *ielb_iou_fpw(void *ctx, iel_pf_fd fd, const unsigned char *buf, size_t count, iel_pf_pos offset, union iel_arg_un flags, void *cbp);
-IEL_API
-void *ielb_iou_fpwv(void *ctx, iel_pf_fd fd, iel_pf_iov *iovecs, size_t iovlen, iel_pf_pos offset, union iel_arg_un flags, void *cbp);
+#define IEL_BACKEND_FNS_ITER(name) \
+    IEL_API iel_fn_##name ielb_iou_##name;
+IEL_BACKEND_FP_FNS
+IEL_BACKEND_E_FNS
+IEL_BACKEND_L_FNS
+IEL_BACKEND_X_FNS
+IEL_BACKEND_NEW_FNS
+#undef IEL_BACKEND_FNS_ITER
 
 IEL_API
 void *ielb_ioux_r(void *ctx, iel_pf_fd fd, const unsigned char *buf, size_t count, union iel_arg_un flags, void *cbp);
@@ -41,41 +42,55 @@ void *ielb_ioux_wv(void *ctx, iel_pf_fd fd, iel_pf_iov *iov, size_t iovcnt, unio
 #define ielb_iou_swv ielb_ioux_wv
 
 /* maybe this should return a handle that allows cancelling */
-IEL_API
-void *ielb_iou_etime(void *ctx, unsigned long long time, union iel_arg_un flags, void *cbp);
-IEL_API
-void *ielb_iou_esoon(void *ctx, union iel_arg_un flags, void *cbp);
-
-IEL_API
-int ielb_iou_lrun1(void *ctx, union iel_arg_un flags);
-
-IEL_API
-size_t ielb_iou_lsize(void);
 #ifndef IEL_USE_STABLE
-#define ielb_iou_lsize() ((size_t)184)
+// read mostly
+struct ielb_iou_ctx_st {
+    /* Submission ring pointers */
+    _Atomic(unsigned) const *sring_head;  /* load-acquire */
+    unsigned *sring_array;  /* store@os */
+    struct io_uring_sqe *mapptr_sqes;  /* store@os */
+    /* Completion ring pointers */
+    _Atomic(unsigned) const *cring_tail;  /* load-acquire */
+    struct io_uring_cqe const *cqes;  /* load@os */
+
+    unsigned lcl_stail;
+    unsigned sring_mask;
+
+    _Atomic(unsigned) *sring_tail;  /* cache; store-release */
+    _Atomic(unsigned) *cring_head;  /* cache; store-release */
+    /* ----- 64B ----- */
+    unsigned lcl_chead;
+    unsigned cring_mask;
+
+    struct iel_que_st taskque; /* TODO: confirm soon semantics */
+    struct iel_que_st sqofq;  /* Submission Queue overflow queue */
+
+    /* ----- cold(SQPOLL) ----- */
+    int ring_fd;
+    /* ----- cold(NORM) ----- */
+    unsigned int maplen_sqes;
+    unsigned int maplen_sq;
+    unsigned int maplen_cq;
+    unsigned long long feat;
+    void *mapptr_sq;
+    void *mapptr_cq;
+};
+#define ielb_iou_lsize() sizeof(struct ielb_iou_ctx_st)
 #endif
 
 /* unsafe variant, could crash the thread but might be slightly faster */
 IEL_API
 int ielb_ioux_lnew_us(void *ctx, union iel_arg_un flags);
-IEL_API
-int ielb_iou_lnew(void *ctx, union iel_arg_un flags);
-IEL_API
-void ielb_iou_ldel(void *ctx);
 
-IEL_API
-union iel_arg_un ielb_iou_xcntl(void *ctx, unsigned short op, union iel_arg_un arg0, union iel_arg_un arg1);
-IEL_API
-unsigned long long ielb_iou_xfeat(void *ctx, union iel_arg_un flags);
 IEL_API
 void ielb_ioux_nop_a(union iel_arg_un flags);
 
 #define ielb_iou_xinit ielb_ioux_nop_a
 #define ielb_iou_xtdwn ielb_ioux_nop_a
-#define ielb_ioux_nop_a(_)
+#define ielb_ioux_nop_a(_) ((void)0)
 
-IEL_GBL
-unsigned long long ielb_iou_cap;
+IEL_STABLE_GBL
+const unsigned long long ielb_iou_cap;
 
 /* Query Submission Queue Length
  * receives: arg0 = (unused), arg1 = (unused)

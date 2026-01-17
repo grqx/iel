@@ -14,9 +14,9 @@
 #if (defined(__cplusplus) && __cplusplus >= 201103L) || \
     (defined(__STDC_VERSION__) && __STDC_VERSION__ >= 202311L)
 /* Never mix compiler-specific attributes with C++11/C23 [[]] attributes */
-#define IEL_C23ATTR_NAMESP(namesp,attr,alt) [[namesp :: attr]]
+#define IEL_C23_NSATTR(namesp,attr,alt) [[namesp :: attr]]
 #else
-#define IEL_C23ATTR_NAMESP(namesp,attr,alt) alt
+#define IEL_C23_NSATTR(namesp,attr,alt) alt
 #endif
 
 #if (defined(__cplusplus) && __cplusplus >= 201703L) || \
@@ -33,8 +33,29 @@
 #define IEL_C23ATTR_DEPRECATED(MSG)
 #endif /* <has deprecated> */
 
+#if (defined(__cplusplus) && __cplusplus >= 202002L) || \
+    (defined(__STDC_VERSION__) && __STDC_VERSION__ >= 202311L)
+#define IEL_C23ATTR_LIKELY [[likely]]
+#define IEL_C23ATTR_UNLIKELY [[unlikely]]
+#else
+#define IEL_C23ATTR_LIKELY
+#define IEL_C23ATTR_UNLIKELY
+#endif /* <has likely & unlikely> */
+
+#if (defined(__cplusplus) && __cplusplus >= 202002L) || defined(_MSC_VER) || defined(__GNUC__)
+/* Argument si must be signed; return type t_ui.
+ * t_ui is the unsigned version of the type of si.
+ */
+#define IEL_ASHR_U(si, n, t_ui) (t_ui)((si) >> (n))
+#else
+/* XXX: relies on two's complement */
+#define IEL_BITNOT_IF_NEG_(x, maybe_neg, t_ui) ((x) ^ (-(t_ui)((maybe_neg) < 0)))
+#define IEL_ASHR_U(si, n, t_ui) \
+    IEL_BITNOT_IF_NEG_((t_ui)(IEL_BITNOT_IF_NEG_((t_ui)si, si, t_ui) >> n), si, t_ui)
+#endif /* <has arithmetic shift right> */
+
 #if defined(__GNUC__)
-#define IEL_ATTR_GNU(x) IEL_C23ATTR_NAMESP(gnu, x, __attribute__((x)))
+#define IEL_ATTR_GNU(x) IEL_C23_NSATTR(gnu, x, __attribute__((x)))
 #define IEL_ATTR_MSC(x)
 
 #if !defined(__clang__) && __GNUC__ >= 11
@@ -86,7 +107,7 @@
 
 #include <sal.h>
 #define IEL_ATTR_GNU(x)
-#define IEL_ATTR_MSC(x) IEL_C23ATTR_NAMESP(msvc, x, __declspec(x))
+#define IEL_ATTR_MSC(x) IEL_C23_NSATTR(msvc, x, __declspec(x))
 #define IEL_FNATTR_ALLOC(dealloc) IEL_ATTR_MSC(restrict)
 #define IEL_FNATTR_NODISCARD_ _Check_return_
 /* TODO: build with /analyze */
@@ -107,6 +128,7 @@
 #endif /* if defined(__GNUC__) || defined(__clang__) */
 
 /* Functions with this attribute must NOT read or modify any global state */
+/* MUST apply to both the declaration AND the definition */
 #define IEL_FNATTR_CONST IEL_ATTR_GNU(const) IEL_ATTR_MSC(noalias)
 /* Functions with this attribute must NOT modify any global state */
 #define IEL_FNATTR_PURE IEL_ATTR_GNU(pure)
@@ -130,7 +152,6 @@
 
 /* MUST apply to both the declaration AND the definition */
 #define IEL_FNATTR_NODISCARD IEL_C23ATTR_NODISCARD IEL_FNATTR_NODISCARD_
-
 
 #ifdef IEL_BUILDING
 
