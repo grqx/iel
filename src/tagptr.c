@@ -35,7 +35,7 @@ uintmax_t maxtag_l(size_t al) {
 
 #endif
 
-#if IEL_PF_X64 && (defined(__GNUC__) || defined(_MSC_VER))
+#if IEL_PF_X64 && (defined(__GNUC__) || defined(_MSC_VER))  // for CPUID
 
 #include <assert.h>
 #include <stdatomic.h>
@@ -51,27 +51,29 @@ typedef unsigned CPUI[4];
 #endif
 
 #if IEL_PF_MMLOWUSER
-#define LA_BITS 47
+#define LA48_TAGH 17
 #define TP_DO_SX 0
 #else
-#define LA_BITS 48
+#define LA48_TAGH 16
 #define TP_DO_SX 1
 #endif
+#define TAGH_BITS LA48_TAGH
 #define IDENTSFX _la48
 #include <iel_priv/tp_tagh.tpl.h>
 #if IEL_PF_MMLOWUSER
-#define LA_BITS 56
+#define LA57_TAGH 8
 #define TP_DO_SX 0
 #else
-#define LA_BITS 57
+#define LA57_TAGL 7
 #define TP_DO_SX 1
 #endif
+#define TAGH_BITS LA57_TAGH
 #define IDENTSFX _la57
 #include <iel_priv/tp_tagh.tpl.h>
 
 static _Atomic(utp_fnptr) utp_v;
 static _Atomic(tp_fnptr) tp_v;
-static _Atomic(maxtag_fnptr) maxtag_v;
+static _Atomic(unsigned char) maxtag_shl = 0;
 
 #define ld_rlx(p) atomic_load_explicit(p, memory_order_relaxed)
 #define st_rlx(p,v) atomic_store_explicit(p, v, memory_order_relaxed)
@@ -88,7 +90,7 @@ void *iel_tp_tag(void const *ptr, size_t al, uintmax_t tag) {
 
 IEL_FNATTR_NODISCARD
 uintmax_t iel_tp_max(size_t al) {
-    return ld_rlx(&maxtag_v)(al);
+    return al << ld_rlx(&maxtag_shl);
 }
 
 void iel_tp_init(void) {
@@ -104,16 +106,16 @@ void iel_tp_init(void) {
     if (la_bits == 48) {
         st_rlx(&tp_v, &tp_la48);
         st_rlx(&utp_v, &utp_la48);
-        st_rlx(&maxtag_v, &maxtag_la48);
+        st_rlx(&maxtag_shl, LA48_TAGH);
     } else if (la_bits == 57) {
         st_rlx(&tp_v, &tp_la57);
         st_rlx(&utp_v, &utp_la57);
-        st_rlx(&maxtag_v, &maxtag_la57);
+        st_rlx(&maxtag_shl, LA57_TAGH);
     } else {
 tagl:;
         st_rlx(&tp_v, &tp_l);
         st_rlx(&utp_v, &utp_l);
-        st_rlx(&maxtag_v, &maxtag_l);
+        // maxtag_shl defaults to 0
     }
 }
 

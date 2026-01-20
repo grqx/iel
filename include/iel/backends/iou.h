@@ -17,6 +17,8 @@ struct ielb_iou_ctx_st;
 #define IEL_BACKEND_FNS_ITER(name) \
     IEL_API iel_fn_##name ielb_iou_##name;
 IEL_BACKEND_FP_FNS
+IEL_BACKEND_FNS_ITER(sa)
+IEL_BACKEND_FNS_ITER(sc)
 IEL_BACKEND_E_FNS
 IEL_BACKEND_L_FNS
 IEL_BACKEND_X_FNS

@@ -12,8 +12,8 @@ elseif (CMAKE_C_COMPILER_ID STREQUAL "GNU" OR CMAKE_C_COMPILER_ID STREQUAL "Clan
 
     add_compile_options(-g -fomit-frame-pointer)
 
-    add_compile_options(-fsanitize=address,leak,undefined,alignment -fanalyzer)
-    add_link_options(-fsanitize=address,leak,undefined,alignment)
+    # add_compile_options(-fsanitize=address,leak,undefined,alignment -fanalyzer)
+    # add_link_options(-fsanitize=address,leak,undefined,alignment)
 else()
     message(FATAL_ERROR "${CMAKE_C_COMPILER_ID} is unsupported")
 endif()

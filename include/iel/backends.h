@@ -6,7 +6,6 @@
 
 #include <iel/platform.h>
 #include <iel/arg.h>
-#include <iel/tagptr.h>
 
 typedef int iel_taskres;
 typedef void (*iel_cb)(void *, iel_taskres);
@@ -33,9 +32,6 @@ struct iel_cb_raw_st {
  */
 #define IEL_RESOLVE_CALL(be_vt,backend,func,paren_args) (IEL_RESOLVE_CALL_(be_vt,backend,func) paren_args)
 
-/* Adds a tag of 0 */
-#define IEL_TAGCB(cb) (iel_tp_tag((void *)(cb), IEL_CB_ALIGN, 0))
-
 // The backend will be available, p_lnew is expected to succeed
 #define IEL_VTSETUP_RET_AVAIL ((unsigned char) '\x00')
 // The backend will be unavailable, p_lnew must always fail
@@ -45,31 +41,68 @@ struct iel_cb_raw_st {
 // The user made a logic error when calling the vtsetup function
 #define IEL_VTSETUP_RET_ERROR ((unsigned char) '\xff')
 
-// TODO: REG_BUF, REG_FD, async accept
+// TODO: REG_BUF, REG_FD
 
+/* fp/FilePosition series */
+/* FilePosition::Read */
 typedef void *(iel_fn_fpr)(void *ctx, iel_pf_fd fd, const unsigned char *buf, size_t count, iel_pf_pos offset, union iel_arg_un flags, void *cbp);
+/* FilePosition::ReadVector */
 typedef void *(iel_fn_fprv)(void *ctx, iel_pf_fd fd, iel_pf_iov *iovecs, size_t iovcnt, iel_pf_pos offset, union iel_arg_un flags, void *cbp);
+/* FilePosition::Write */
 typedef void *(iel_fn_fpw)(void *ctx, iel_pf_fd fd, const unsigned char *buf, size_t count, iel_pf_pos offset, union iel_arg_un flags, void *cbp);
+/* FilePosition::WriteVector */
 typedef void *(iel_fn_fpwv)(void *ctx, iel_pf_fd fd, iel_pf_iov *iovecs, size_t iovcnt, iel_pf_pos offset, union iel_arg_un flags, void *cbp);
+
+/* f/File series */
+/* File::Read */
 typedef void *(iel_fn_fr)(void *ctx, iel_pf_fd fd, const unsigned char *buf, size_t count, union iel_arg_un flags, void *cbp);
+/* File::ReadVector */
 typedef void *(iel_fn_frv)(void *ctx, iel_pf_fd fd, iel_pf_iov *iov, size_t iovcnt, union iel_arg_un flags, void *cbp);
+/* File::Write */
 typedef void *(iel_fn_fw)(void *ctx, iel_pf_fd fd, const unsigned char *buf, size_t count, union iel_arg_un flags, void *cbp);
+/* File::WriteVector */
 typedef void *(iel_fn_fwv)(void *ctx, iel_pf_fd fd, iel_pf_iov *iov, size_t iovcnt, union iel_arg_un flags, void *cbp);
 
+/* s/Socket series */
+/* Socket::Accept
+ * Completes when read-ready.
+ */
+typedef void *(iel_fn_sa)(void *ctx, iel_pf_sockfd fd, iel_pf_sockaf *addr_out, iel_pf_socklen *addrlen_out, union iel_arg_un flags, void *cbp);
+/* Socket::Connect
+ * Completes when write-ready.
+ */
+typedef void *(iel_fn_sc)(void *ctx, iel_pf_sockfd fd, iel_pf_sockaf *addr, iel_pf_socklen addrlen, union iel_arg_un flags, void *cbp);
+
+/* Socket::Read */
 typedef void *(iel_fn_sr)(void *ctx, iel_pf_sockfd fd, const unsigned char *buf, size_t count, union iel_arg_un flags, void *cbp);
+/* Socket::ReadVector */
 typedef void *(iel_fn_srv)(void *ctx, iel_pf_sockfd fd, iel_pf_iov *iov, size_t iovcnt, union iel_arg_un flags, void *cbp);
+/* Socket::Write */
 typedef void *(iel_fn_sw)(void *ctx, iel_pf_sockfd fd, const unsigned char *buf, size_t count, union iel_arg_un flags, void *cbp);
+/* Socket::WriteVector */
 typedef void *(iel_fn_swv)(void *ctx, iel_pf_sockfd fd, iel_pf_iov *iov, size_t iovcnt, union iel_arg_un flags, void *cbp);
 
+/* e/Execute series */
+/* Execute::Timer */
 typedef void *(iel_fn_etime)(void *ctx, unsigned long long time, union iel_arg_un flags, void *cbp);
+/* Execute::Soon */
 typedef void *(iel_fn_esoon)(void *ctx, union iel_arg_un flags, void *cbp);
 
+/* l/Loop series */
+/* Loop::GetCtxSize */
 typedef size_t (iel_fn_lsize)(void);
+/* Loop::New */
 typedef int (iel_fn_lnew)(void *ctx, union iel_arg_un flags);
+/* Loop::Delete */
 typedef void (iel_fn_ldel)(void *ctx);
+/* Loop::RunOnce
+ * This might call more than one pending callbacks
+ */
 typedef int (iel_fn_lrun1)(void *ctx, union iel_arg_un flags);
 
-/* xfeat() works in two modes:
+/* x/Misc series */
+/* Misc::GetFeatures
+ * xfeat() works in two modes:
  * 1. static feature flags:
  *   When xfeat(NULL, IEL_ARG_NULL) & IEL_FEAT_AVAIL.
  *   The above call must happen after xinit(), and possibly before lnew().
@@ -83,45 +116,44 @@ typedef int (iel_fn_lrun1)(void *ctx, union iel_arg_un flags);
  *   as long as instance and the flags argument are valid.
  */
 typedef unsigned long long (iel_fn_xfeat)(void *ctx, union iel_arg_un flags);
+/* Misc::Control */
 typedef union iel_arg_un (iel_fn_xcntl)(void *ctx, unsigned short op, union iel_arg_un arg0, union iel_arg_un arg1);
+/* Misc::Initialize */
 typedef void (iel_fn_xinit)(union iel_arg_un flags);
+/* Misc::TearDown */
 typedef void (iel_fn_xtdwn)(union iel_arg_un flags);
 
 #define IEL_BACKEND_FP_FNS \
-    /* fp/FilePosition series */ \
     IEL_BACKEND_FNS_ITER(fpr) \
     IEL_BACKEND_FNS_ITER(fprv) \
     IEL_BACKEND_FNS_ITER(fpw) \
     IEL_BACKEND_FNS_ITER(fpwv)
 
 #define IEL_BACKEND_F_FNS \
-    /* f/File series */ \
     IEL_BACKEND_FNS_ITER(fr) \
     IEL_BACKEND_FNS_ITER(frv) \
     IEL_BACKEND_FNS_ITER(fw) \
     IEL_BACKEND_FNS_ITER(fwv)
 
 #define IEL_BACKEND_S_FNS \
-    /* s/Socket series */ \
+    IEL_BACKEND_FNS_ITER(sa) \
+    IEL_BACKEND_FNS_ITER(sc) \
     IEL_BACKEND_FNS_ITER(sr) \
     IEL_BACKEND_FNS_ITER(srv) \
     IEL_BACKEND_FNS_ITER(sw) \
     IEL_BACKEND_FNS_ITER(swv)
 
 #define IEL_BACKEND_E_FNS \
-    /* e/Execute series */ \
     IEL_BACKEND_FNS_ITER(etime) \
     IEL_BACKEND_FNS_ITER(esoon)
 
 #define IEL_BACKEND_L_FNS \
-    /* l/Loop series */ \
     IEL_BACKEND_FNS_ITER(lnew) \
     IEL_BACKEND_FNS_ITER(ldel) \
     IEL_BACKEND_FNS_ITER(lrun1) \
     IEL_BACKEND_FNS_ITER(lsize)
 
 #define IEL_BACKEND_X_FNS \
-    /* x/misc series */ \
     IEL_BACKEND_FNS_ITER(xfeat) \
     IEL_BACKEND_FNS_ITER(xcntl) \
     IEL_BACKEND_FNS_ITER(xinit) \
@@ -156,6 +188,8 @@ struct iel_vtable_st {
 #define IEL_FEAT_AVAIL (1ULL << 63)
 /* Indicates availability of the flag IEL_FLAG_ETIME_MICROS */
 #define IEL_FEAT_ETIME_MICROS (1ULL << 62)
+/* Indicates availability of the flag IEL_FLAG_REQLNK */
+#define IEL_FEAT_REQLNK (1ULL << 61)
 
 /* Applies to: etime
  * Available when: feature flag IEL_FEAT_ETIME_MICROS is set
@@ -163,10 +197,19 @@ struct iel_vtable_st {
  */
 #define IEL_FLAG_ETIME_MICROS (1ULL << 63)
 /* Applies to: fp series, f series, s series, etime
- * Available when: false
+ * Available when: feature flag IEL_FEAT_REQLNK is set
+ * Links the current task with the next one.
+ * The user_data argument will be ignored.
+ * XXX: esoon is not yet supported
+ */
+#define IEL_FLAG_REQLNK (1ULL << 62)
+#if 0
+/* Applies to: fp series, f series, s series, etime
+ * Available when: FIXME: false
  * Makes the task multishot
  * TODO: allow cancelling? and implementation
  */
 #define IEL_FLAG_MULTISHOT (1ULL << 62)
+#endif
 
 #endif /* ifndef IEL_BACKENDS_H_ */

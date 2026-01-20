@@ -174,6 +174,15 @@ void *ielb_ioux_wv(void *ctx, iel_pf_fd fd, iel_pf_iov *iov, size_t iovcnt, unio
     return submit_to_sq((struct ielb_iou_ctx_st *)ctx, IORING_OP_WRITEV, fd, (unsigned long long)-1, (unsigned long long)iov, iovcnt, cbp);
 }
 
+void *ielb_iou_sa(void *ctx, iel_pf_sockfd fd, iel_pf_sockaf *addr_out, iel_pf_socklen *addrlen_out, union iel_arg_un flags, void *cbp) {
+    (void) flags;
+    return submit_to_sq((struct ielb_iou_ctx_st *)ctx, IORING_OP_ACCEPT, fd, (unsigned long long)addrlen_out, (unsigned long long)addr_out, 0, cbp);
+}
+void *ielb_iou_sc(void *ctx, iel_pf_sockfd fd, iel_pf_sockaf *addr, iel_pf_socklen addrlen, union iel_arg_un flags, void *cbp) {
+    return submit_to_sq((struct ielb_iou_ctx_st *)ctx, IORING_OP_CONNECT, fd, (unsigned long long)addrlen, (unsigned long long)addr, 0, cbp);
+    (void) flags;
+}
+
 struct ielb_ioux_etime_cbt {
     IEL_CB_BASE base;
     struct timespec ts;
@@ -185,7 +194,7 @@ void ielb_ioux_etime_cb(void *_self, int res) {
     iel_cb cb_inner;
     void *user_data;
     {
-        struct ielb_ioux_etime_cbt *cbp = (struct ielb_ioux_etime_cbt *)iel_tp_untag(_self, IEL_CB_ALIGN).ptr;
+        struct ielb_ioux_etime_cbt *cbp = (struct ielb_ioux_etime_cbt *)_self;
         user_data = cbp->user_data;
 
         cb_inner = *(iel_cb *)iel_tp_untag(user_data, IEL_CB_ALIGN).ptr;
@@ -224,13 +233,13 @@ void *ielb_iou_etime(void *ctx, unsigned long long time, union iel_arg_un flags,
     wcbp->base = &ielb_ioux_etime_cb;
     wcbp->user_data = user_data;
 
-    return submit_to_sq(pud, IORING_OP_TIMEOUT, 0, 0, (unsigned long long)&wcbp->ts, 1, IEL_TAGCB(&wcbp->base));
+    return submit_to_sq(pud, IORING_OP_TIMEOUT, 0, 0, (unsigned long long)&wcbp->ts, 1, &wcbp->base);
 }
 
 void *ielb_iou_esoon(void *ctx, union iel_arg_un flags, void *user_data) {
     (void) flags;
     struct ielb_iou_ctx_st *pud = (struct ielb_iou_ctx_st *)ctx;
-#if 0
+#if 0  // TODO: update to use iel_cb *
     void **pout = iel_quep_rsv1(&pud->taskque);
     if (!pout) {
         iel_cbp cbp = (iel_cbp)iel_tp_untag(user_data, IEL_CB_ALIGN).ptr;
@@ -638,35 +647,8 @@ unsigned char ielb_iou_vtsetup(struct iel_vtable_st *vt) {
         errno = EINVAL;
         return IEL_VTSETUP_RET_ERROR;
     }
-#define SETUP_VTABLE_FN(x, y) vt->p_##x = &ielb_iou_##y
-#define SETUP_VTABLE_NAME(x) SETUP_VTABLE_FN(x,x)
-    SETUP_VTABLE_NAME(fpr);
-    SETUP_VTABLE_NAME(fprv);
-    SETUP_VTABLE_NAME(fpw);
-    SETUP_VTABLE_NAME(fpwv);
-
-    SETUP_VTABLE_NAME(fr);
-    SETUP_VTABLE_NAME(frv);
-    SETUP_VTABLE_NAME(fw);
-    SETUP_VTABLE_NAME(fwv);
-
-    SETUP_VTABLE_NAME(sr);
-    SETUP_VTABLE_NAME(srv);
-    SETUP_VTABLE_NAME(sw);
-    SETUP_VTABLE_NAME(swv);
-
-    SETUP_VTABLE_NAME(etime);
-    SETUP_VTABLE_NAME(esoon);
-
-    SETUP_VTABLE_NAME(ldel);
-    SETUP_VTABLE_NAME(lrun1);
-    SETUP_VTABLE_NAME(lsize);
-
-    SETUP_VTABLE_NAME(xfeat);
-    SETUP_VTABLE_NAME(xcntl);
-
-    SETUP_VTABLE_NAME(xinit);
-    SETUP_VTABLE_NAME(xtdwn);
+#define IEL_BACKEND_FNS_ITER(name) vt->p_ ## name = &ielb_iou_ ## name;
+    IEL_BACKEND_FNS
 
     int scmode = prctl(PR_GET_SECCOMP);
     // scmode won't be SECCOMP_MODE_STRICT since prctl would be blocked in that case
@@ -674,14 +656,12 @@ unsigned char ielb_iou_vtsetup(struct iel_vtable_st *vt) {
         vt->p_lnew = &ielb_ioux_lnew_us;
     } else {
         fputs("SECCOMP_MODE_FILTER\n", stderr);
-        SETUP_VTABLE_NAME(lnew);
         // Android (app) uses SECCOMP_RET_TRAP (syscall ret 64), and docker uses SECCOMP_RET_ERRNO | EPERM (or lsm?)
         // doesn't work for SECCOMP_RET_KILL_PROCESS
         // Note: the use of SECCOMP_RET_KILL_THREAD to kill a single thread in a multithreaded process is likely to leave the process in a permanently inconsistent and possibly corrupt state.
 
     }
-#undef SETUP_VTABLE_NAME
-#undef SETUP_VTABLE_FN
+#undef IEL_BACKEND_FNS_ITER
 
     return IEL_VTSETUP_RET_UNSURE;
 #endif /* ifndef __linux__ */
