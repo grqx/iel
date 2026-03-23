@@ -405,6 +405,7 @@ int main(int argc, char **argv) {
         return 1;
     } else if (lres == IEL_VTSETUP_RET_UNAVAIL) {
         fputs("NO PROVIDERS AVAILABLE!\n", stderr);
+        return 1;
     }
     IEL_RESOLVE_CALL(loop.vt, iou, xinit, (IEL_ARG_NULL));
     loop.ctx = (struct ielb_iou_ctx_st *)malloc(IEL_RESOLVE_CALL(loop.vt, iou, lsize, ()));
@@ -418,7 +419,6 @@ int main(int argc, char **argv) {
     {
         iel_fn_lnew *p_lnew = loop.vt.p_lnew;
         unsigned long long m0 = micros();
-        /* Setup io_uring for use */
         lres = p_lnew(loop.ctx, IEL_ARG_NULL);
         unsigned long long m1 = micros();
         fprintf(stderr, "micros() spent on initialisation: %llu;lres=%d\n", m1 - m0, lres);

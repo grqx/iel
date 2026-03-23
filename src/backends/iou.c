@@ -3,6 +3,7 @@
 // XXX: never use IOSQE_IO_HARDLINK without IOSQE_IO_LINK, or
 // any flag that implies IOSQE_IO_LINK
 #define _DEFAULT_SOURCE
+#define _BSD_SOURCE
 #include <pthread.h>
 #include <time.h>
 #include <signal.h>
@@ -29,6 +30,12 @@
 #include <iel/tagptr.h>
 #include <iel/errno.h>
 #include <iel_priv/quep.h>
+
+#ifdef NDEBUG
+#define DBG(...) ;
+#else
+#define DBG(...) fprintf(stderr, __VA_ARGS__);
+#endif
 
 #define SQOFQ_CHUNK_SZ_BIT 10
 static_assert(SQOFQ_CHUNK_SZ_BIT > 3, "Chunk too small");
@@ -100,7 +107,7 @@ int io_uring_enter(int ring_fd, unsigned int to_submit,
 * Submit a read or a write request to the submission queue.
 * */
 static inline
-void *submit_to_sq(struct ielb_iou_ctx_st *pud, unsigned char op, int fd, long long off, unsigned long long addr, unsigned int len, void *user_data) {
+void *submit_to_sq(struct ielb_iou_ctx_st *pud, unsigned char op, int fd, long long off, unsigned long long addr, unsigned int len, void *user_data, unsigned long long flags) {
     // TODO: handle CQ overflow/-EBUSY? see IORING_FEAT_NODROP in io_uring_setup(2)
     unsigned tail = pud->lcl_stail;
     unsigned sq_ents = (unsigned)(tail - ld_acq(pud->sring_head));
@@ -114,10 +121,10 @@ void *submit_to_sq(struct ielb_iou_ctx_st *pud, unsigned char op, int fd, long l
             iel_errno = IEL_ENOMEM;
             return NULL;
         }
-        fprintf(stderr, "sq full!\n");
+        DBG("sq full!\n");
     } else {
         unsigned index;
-        fprintf(stderr, "pushing event into sq, current size: %u\n", sq_ents);
+        DBG("pushing event into sq, current size: %u\n", sq_ents);
         index = tail & pud->sring_mask;
         /* Add our submission queue entry to the tail of the SQE ring buffer */
         sqe = &pud->mapptr_sqes[index];
@@ -127,7 +134,7 @@ void *submit_to_sq(struct ielb_iou_ctx_st *pud, unsigned char op, int fd, long l
     }
     /* Fill in the parameters required for the read or write operation */
     memset(sqe, 0, 64);
-    sqe->flags = 0;
+    sqe->flags = flags & IEL_FEAT_REQLNK ? IOSQE_IO_LINK | IOSQE_CQE_SKIP_SUCCESS : 0;
     sqe->opcode = op;
     sqe->fd = fd;
     sqe->addr = addr;
@@ -141,46 +148,36 @@ void *submit_to_sq(struct ielb_iou_ctx_st *pud, unsigned char op, int fd, long l
 
 
 void *ielb_iou_fpr(void *ctx, iel_pf_fd fd, const unsigned char *buf, size_t count, iel_pf_pos offset, union iel_arg_un flags, void *cbp) {
-    (void) flags;
-    return submit_to_sq((struct ielb_iou_ctx_st *)ctx, IORING_OP_READ, fd, offset, (unsigned long long)buf, count, cbp);
+    return submit_to_sq((struct ielb_iou_ctx_st *)ctx, IORING_OP_READ, fd, offset, (unsigned long long)buf, count, cbp, flags.ull);
 }
 void *ielb_iou_fprv(void *ctx, iel_pf_fd fd, iel_pf_iov *iovecs, size_t iovcnt, iel_pf_pos offset, union iel_arg_un flags, void *cbp) {
-    (void) flags;
-    return submit_to_sq((struct ielb_iou_ctx_st *)ctx, IORING_OP_READV, fd, offset, (unsigned long long)iovecs, iovcnt, cbp);
+    return submit_to_sq((struct ielb_iou_ctx_st *)ctx, IORING_OP_READV, fd, offset, (unsigned long long)iovecs, iovcnt, cbp, flags.ull);
 }
 void *ielb_iou_fpw(void *ctx, iel_pf_fd fd, const unsigned char *buf, size_t count, iel_pf_pos offset, union iel_arg_un flags, void *cbp) {
-    (void) flags;
-    return submit_to_sq((struct ielb_iou_ctx_st *)ctx, IORING_OP_WRITE, fd, offset, (unsigned long long)buf, count, cbp);
+    return submit_to_sq((struct ielb_iou_ctx_st *)ctx, IORING_OP_WRITE, fd, offset, (unsigned long long)buf, count, cbp, flags.ull);
 }
 void *ielb_iou_fpwv(void *ctx, iel_pf_fd fd, iel_pf_iov *iovecs, size_t iovcnt, iel_pf_pos offset, union iel_arg_un flags, void *cbp) {
-    (void) flags;
-    return submit_to_sq((struct ielb_iou_ctx_st *)ctx, IORING_OP_WRITEV, fd, offset, (unsigned long long)iovecs, iovcnt, cbp);
+    return submit_to_sq((struct ielb_iou_ctx_st *)ctx, IORING_OP_WRITEV, fd, offset, (unsigned long long)iovecs, iovcnt, cbp, flags.ull);
 }
 
 void *ielb_ioux_r(void *ctx, iel_pf_fd fd, const unsigned char *buf, size_t count, union iel_arg_un flags, void *cbp) {
-    (void) flags;
-    return submit_to_sq((struct ielb_iou_ctx_st *)ctx, IORING_OP_READ, fd, (unsigned long long)-1, (unsigned long long)buf, count, cbp);
+    return submit_to_sq((struct ielb_iou_ctx_st *)ctx, IORING_OP_READ, fd, (unsigned long long)-1, (unsigned long long)buf, count, cbp, flags.ull);
 }
 void *ielb_ioux_rv(void *ctx, iel_pf_fd fd, iel_pf_iov *iov, size_t iovcnt, union iel_arg_un flags, void *cbp) {
-    (void) flags;
-    return submit_to_sq((struct ielb_iou_ctx_st *)ctx, IORING_OP_READV, fd, (unsigned long long)-1, (unsigned long long)iov, iovcnt, cbp);
+    return submit_to_sq((struct ielb_iou_ctx_st *)ctx, IORING_OP_READV, fd, (unsigned long long)-1, (unsigned long long)iov, iovcnt, cbp, flags.ull);
 }
 void *ielb_ioux_w(void *ctx, iel_pf_fd fd, const unsigned char *buf, size_t count, union iel_arg_un flags, void *cbp) {
-    (void) flags;
-    return submit_to_sq((struct ielb_iou_ctx_st *)ctx, IORING_OP_WRITE, fd, (unsigned long long)-1, (unsigned long long)buf, count, cbp);
+    return submit_to_sq((struct ielb_iou_ctx_st *)ctx, IORING_OP_WRITE, fd, (unsigned long long)-1, (unsigned long long)buf, count, cbp, flags.ull);
 }
 void *ielb_ioux_wv(void *ctx, iel_pf_fd fd, iel_pf_iov *iov, size_t iovcnt, union iel_arg_un flags, void *cbp) {
-    (void) flags;
-    return submit_to_sq((struct ielb_iou_ctx_st *)ctx, IORING_OP_WRITEV, fd, (unsigned long long)-1, (unsigned long long)iov, iovcnt, cbp);
+    return submit_to_sq((struct ielb_iou_ctx_st *)ctx, IORING_OP_WRITEV, fd, (unsigned long long)-1, (unsigned long long)iov, iovcnt, cbp, flags.ull);
 }
 
 void *ielb_iou_sa(void *ctx, iel_pf_sockfd fd, iel_pf_sockaf *addr_out, iel_pf_socklen *addrlen_out, union iel_arg_un flags, void *cbp) {
-    (void) flags;
-    return submit_to_sq((struct ielb_iou_ctx_st *)ctx, IORING_OP_ACCEPT, fd, (unsigned long long)addrlen_out, (unsigned long long)addr_out, 0, cbp);
+    return submit_to_sq((struct ielb_iou_ctx_st *)ctx, IORING_OP_ACCEPT, fd, (unsigned long long)addrlen_out, (unsigned long long)addr_out, 0, cbp, flags.ull);
 }
 void *ielb_iou_sc(void *ctx, iel_pf_sockfd fd, iel_pf_sockaf *addr, iel_pf_socklen addrlen, union iel_arg_un flags, void *cbp) {
-    return submit_to_sq((struct ielb_iou_ctx_st *)ctx, IORING_OP_CONNECT, fd, (unsigned long long)addrlen, (unsigned long long)addr, 0, cbp);
-    (void) flags;
+    return submit_to_sq((struct ielb_iou_ctx_st *)ctx, IORING_OP_CONNECT, fd, (unsigned long long)addrlen, (unsigned long long)addr, 0, cbp, flags.ull);
 }
 
 struct ielb_ioux_etime_cbt {
@@ -233,7 +230,7 @@ void *ielb_iou_etime(void *ctx, unsigned long long time, union iel_arg_un flags,
     wcbp->base = &ielb_ioux_etime_cb;
     wcbp->user_data = user_data;
 
-    return submit_to_sq(pud, IORING_OP_TIMEOUT, 0, 0, (unsigned long long)&wcbp->ts, 1, &wcbp->base);
+    return submit_to_sq(pud, IORING_OP_TIMEOUT, 0, 0, (unsigned long long)&wcbp->ts, 1, &wcbp->base, 0);
 }
 
 void *ielb_iou_esoon(void *ctx, union iel_arg_un flags, void *user_data) {
@@ -251,7 +248,7 @@ void *ielb_iou_esoon(void *ctx, union iel_arg_un flags, void *user_data) {
     *pout = user_data;
     return user_data;
 #else
-    return submit_to_sq(pud, IORING_OP_NOP, 0, 0, 0, 0, user_data);
+    return submit_to_sq(pud, IORING_OP_NOP, 0, 0, 0, 0, user_data, 0);
 #endif
 }
 
@@ -274,13 +271,13 @@ int ielb_iou_lrun1(void *ctx, union iel_arg_un flags) {
 
     // relaxed as no synchronisation required
     sq_len = pud->lcl_stail - ld_rlx(pud->sring_head);
-    fprintf(stderr, "awaiting submission of %u SQEs and completion of 1 event; submitted: [\n", sq_len);
+    DBG("awaiting submission of %u SQEs and completion of 1 event; submitted: [\n", sq_len);
     for (unsigned idx = ld_acq(pud->sring_head); idx < pud->lcl_stail; ++idx) {
         unsigned real_idx = pud->sring_array[idx & pud->sring_mask];
         struct io_uring_sqe *s = &pud->mapptr_sqes[real_idx];
-        fprintf(stderr, "  {OP=%hu,\tUD=%p}@%p\n", s->opcode, (void *)s->user_data, (void *)s);
+        DBG("  {OP=%hu,\tUD=%p}@%p\n", s->opcode, (void *)s->user_data, (void *)s);
     }
-    fprintf(stderr, "]\n");
+    DBG("]\n");
     // TODO: submission indirect arguments could be put into an arena, freed when submitted
     // e.g. struct timespec in the timer
     /*
@@ -299,7 +296,7 @@ int ielb_iou_lrun1(void *ctx, union iel_arg_un flags) {
     }
 
     size_t xsq_sz = ielb_ioux_xsq_size(&pud->sqofq);
-    fprintf(stderr, "XSQ has %zu; reading from cq %u entries\n", xsq_sz, ld_acq(pud->cring_tail) - pud->lcl_chead);
+    DBG("XSQ has %zu; reading from cq %u entries\n", xsq_sz, ld_acq(pud->cring_tail) - pud->lcl_chead);
     if (xsq_sz) {
         unsigned safe_popsz;
         {
@@ -366,15 +363,15 @@ int ielb_iou_lrun1(void *ctx, union iel_arg_un flags) {
             arr_sz = (pud->sring_mask + 1) - idx_begin;
             if (arr_sz > safe_popsz) arr_sz = safe_popsz;
 
-            fprintf(stderr, "p2[elem %hu] => %p\n", arr_sz, (void *)arr_out);
+            DBG("p2[elem %hu] => %p\n", arr_sz, (void *)arr_out);
             safe_popsz -= (unsigned)ielb_ioux_xsq_pop_to(&pud->sqofq, arr_out, (size_t)arr_sz);
-            fprintf(stderr, "p2E r=%hu\n", safe_popsz);
+            DBG("p2E r=%hu\n", safe_popsz);
 
             arr_out = pud->mapptr_sqes;
             arr_sz = idx_begin < safe_popsz ? idx_begin : safe_popsz;
-            fprintf(stderr, "p2[elem %hu] => %p\n", arr_sz, (void *)arr_out);
+            DBG("p2[elem %hu] => %p\n", arr_sz, (void *)arr_out);
             safe_popsz -= ielb_ioux_xsq_pop_to(&pud->sqofq, arr_out, (size_t)arr_sz);
-            fprintf(stderr, "p2E r=%hu\n", safe_popsz);
+            DBG("p2E r=%hu\n", safe_popsz);
         }
         {
             printf("after: (struct iel_que_st) { .map=%p, .mapcap=%zu, .chunk_s=%zu, .os_s=%hu, .chunk_e=%zu, .os_e=%hu }\nmap: [", pud->sqofq.map, pud->sqofq.mapcap, pud->sqofq.chunk_s, pud->sqofq.os_s, pud->sqofq.chunk_e, pud->sqofq.os_e);
@@ -401,7 +398,7 @@ int ielb_iou_lrun1(void *ctx, union iel_arg_un flags) {
         struct io_uring_cqe const *cqe = &pud->cqes[pud->lcl_chead & pud->cring_mask];
 
         if (cqe->user_data) {
-            fprintf(stderr, "C: %p\n", (void *)cqe->user_data);
+            DBG("C: %p\n", (void *)cqe->user_data);
             iel_cb cb = *(iel_cb *)iel_tp_untag((void *)cqe->user_data, IEL_CB_ALIGN).ptr;
             cb((void *)cqe->user_data, cqe->res);
         }
@@ -438,7 +435,7 @@ int ielb_ioux_lnew_us(void *ctx, union iel_arg_un flags) {
         perror("io_uring_setup");
         goto fail;
     } else
-        fprintf(stderr, "io_uring_setup returned %d\n", pud->ring_fd);
+        DBG("io_uring_setup returned %d\n", pud->ring_fd);
     if (!(p.features & (IORING_FEAT_NODROP | IORING_FEAT_RW_CUR_POS)))
         goto fail_closefd;
 
@@ -521,7 +518,7 @@ int ielb_ioux_lnew_us(void *ctx, union iel_arg_un flags) {
 
     pud->lcl_stail = *pud->sring_tail;
     pud->lcl_chead = *pud->cring_head;
-    pud->feat = IEL_FEAT_AVAIL | IEL_FEAT_ETIME_MICROS;
+    pud->feat = IEL_FEAT_AVAIL | IEL_FEAT_ETIME_MICROS | IEL_FEAT_REQLNK;
 
     return 0;
 fail_deltaskq:;
@@ -577,8 +574,9 @@ void *ielb_ioux_lnewt_cb(void *_arg) {
     sigaction(SIGSYS, &sa, NULL);
     int r = ielb_ioux_lnew_us(arg->ctx, IEL_ARG_NULL);
     if (r)
-        fprintf(stderr, "erret: %d\n", r);
+        DBG("erret: %d\n", r);
     arg->res = r;
+    signal(SIGSYS, SIG_DFL);
     return NULL;
 }
 int ielb_iou_lnew(void *ctx, union iel_arg_un flags) {
@@ -590,12 +588,12 @@ int ielb_iou_lnew(void *ctx, union iel_arg_un flags) {
 
     res = pthread_create(&pth, NULL, ielb_ioux_lnewt_cb, &arg);
     if (res) {
-        fprintf(stderr, "pthread_create: %s\n", strerror(res));
+        DBG("pthread_create: %s\n", strerror(res));
         return 4;
     }
     res = pthread_join(pth, &tres);
     if (res) {
-        fprintf(stderr, "pthread_join: %s\n", strerror(res));
+        DBG("pthread_join: %s\n", strerror(res));
         return 3;
     }
     return arg.res;
@@ -655,7 +653,7 @@ unsigned char ielb_iou_vtsetup(struct iel_vtable_st *vt) {
     if (scmode == SECCOMP_MODE_DISABLED) {
         vt->p_lnew = &ielb_ioux_lnew_us;
     } else {
-        fputs("SECCOMP_MODE_FILTER\n", stderr);
+        DBG("SECCOMP_MODE_FILTER\n");
         // Android (app) uses SECCOMP_RET_TRAP (syscall ret 64), and docker uses SECCOMP_RET_ERRNO | EPERM (or lsm?)
         // doesn't work for SECCOMP_RET_KILL_PROCESS
         // Note: the use of SECCOMP_RET_KILL_THREAD to kill a single thread in a multithreaded process is likely to leave the process in a permanently inconsistent and possibly corrupt state.

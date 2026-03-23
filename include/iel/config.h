@@ -193,7 +193,6 @@
 
 /* compulsory for internal globals, optional for functions
  * NEVER USE THE KEYWORD extern IN YOUR CODE!!!
- * NEVER USE THIS ATTRIBUTE IN PUBLIC HEADERS!!!
  */
 #define IEL_INTERNAL_GBL IEL_SYMATTR_HIDDEN_ extern
 

@@ -30,7 +30,7 @@ target_compile_definitions(iel PRIVATE IEL_BUILDING=2)
 target_include_directories(iel PUBLIC include/)
 
 # feat.h feature test macros
-option(IEL_AA64_HAVE_MTE "Whether AArch64 Memory Tagging Extension is enabled on the target. When set, tagging pointers doesn't collide with MTE." OFF)
+# option(IEL_AA64_HAVE_MTE "Whether AArch64 Memory Tagging Extension is enabled on the target. When set, tagging pointers doesn't collide with MTE." OFF)
 check_include_file("unistd.h" IEL_HAVE_UNISTD_H)
 list(APPEND CMAKE_REQUIRED_DEFINITIONS -D_POSIX_C_SOURCE=200112L)
 check_symbol_exists(posix_memalign "stdlib.h" IEL_HAVE_POSIX2001_MEMALIGN)

@@ -7,6 +7,8 @@
 #include <iel/platform.h>
 #include <iel/arg.h>
 
+struct iel_vtable_st;
+
 typedef int iel_taskres;
 typedef void (*iel_cb)(void *, iel_taskres);
 /* TODO: add a flag for max-aligned callbacks(incompatible ABI!) */
@@ -40,6 +42,8 @@ struct iel_cb_raw_st {
 #define IEL_VTSETUP_RET_UNSURE ((unsigned char) '\x02')
 // The user made a logic error when calling the vtsetup function
 #define IEL_VTSETUP_RET_ERROR ((unsigned char) '\xff')
+
+typedef unsigned char (iel_fn_vtsetup)(struct iel_vtable_st *);
 
 // TODO: REG_BUF, REG_FD
 
@@ -82,7 +86,9 @@ typedef void *(iel_fn_sw)(void *ctx, iel_pf_sockfd fd, const unsigned char *buf,
 /* Socket::WriteVector */
 typedef void *(iel_fn_swv)(void *ctx, iel_pf_sockfd fd, iel_pf_iov *iov, size_t iovcnt, union iel_arg_un flags, void *cbp);
 
-/* e/Execute series */
+/* e/Execute series
+ * TODO: libuv-ish idle(don't call it idle)/prepare callback queue
+ */
 /* Execute::Timer */
 typedef void *(iel_fn_etime)(void *ctx, unsigned long long time, union iel_arg_un flags, void *cbp);
 /* Execute::Soon */

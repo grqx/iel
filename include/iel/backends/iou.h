@@ -10,7 +10,7 @@
 #include <iel/quedecl.h>
 
 IEL_STABLE_API
-unsigned char ielb_iou_vtsetup(struct iel_vtable_st *vt);
+iel_fn_vtsetup ielb_iou_vtsetup;
 
 struct ielb_iou_ctx_st;
 
@@ -45,6 +45,8 @@ void *ielb_ioux_wv(void *ctx, iel_pf_fd fd, iel_pf_iov *iov, size_t iovcnt, unio
 
 /* maybe this should return a handle that allows cancelling */
 #ifndef IEL_USE_STABLE
+struct io_uring_sqe;
+struct io_uring_cqe;
 // read mostly
 struct ielb_iou_ctx_st {
     /* Submission ring pointers */

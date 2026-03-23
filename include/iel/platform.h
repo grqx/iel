@@ -8,8 +8,8 @@
 #include <sys/socket.h>  /* iovec, socklen_t */
 
 typedef struct iovec iel_pf_iov;
-#define IEL_PF_IOVEC_M_ptr iov_base
-#define IEL_PF_IOVEC_M_len iov_len
+#define IEL_IOV_M_ptr iov_base
+#define IEL_IOV_M_len iov_len
 typedef int iel_pf_fd;
 typedef int iel_pf_sockfd;
 typedef off_t iel_pf_pos;
@@ -19,10 +19,11 @@ typedef socklen_t iel_pf_socklen;
 typedef sa_family_t iel_pf_sockaf;
 #endif  /* ifdef _WIN32 */
 
-
-#define IEL_PF_IOV_GET(iov, m) (iov.IEL_PF_IOVEC_M_ ## m)
-
-#define IEL_PF_IOV_PTR(iov) IEL_PF_IOV_GET(iov, ptr)
-#define IEL_PF_IOV_LEN(iov) IEL_PF_IOV_GET(iov, len)
+#define IEL_IOV_ptr_of(iov) ( (iov) . IEL_IOV_M_ptr )
+#define IEL_IOV_len_of(iov) ( (iov) . IEL_IOV_M_len )
+#define IEL_IOV_M(iov, mem) IEL_IOV_ ## mem ## _of (iov)
+#define IEL_IOV_offsetof_ptr offsetof(iel_pf_iov, IEL_IOV_M_ptr)
+#define IEL_IOV_offsetof_len offsetof(iel_pf_iov, IEL_IOV_M_len)
+#define IEL_IOV_offsetof(mem) IEL_IOV_offsetof_ ## mem
 
 #endif /* ifndef IEL_PLATFORM_H_ */
