@@ -70,8 +70,9 @@ struct ielb_iou_ctx_st {
     struct iel_que_st sqofq;  /* Submission Queue overflow queue */
 
     /* ----- cold(SQPOLL) ----- */
-    int ring_fd;
+    unsigned ring_fd_registered;
     /* ----- cold(NORM) ----- */
+    int ring_fd;
     unsigned int maplen_sqes;
     unsigned int maplen_sq;
     unsigned int maplen_cq;

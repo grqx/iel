@@ -1,4 +1,5 @@
 // TODO: verify iel_arg_un flags is empty and return EINVAL when invalid
+// TODO: <0 for error
 // XXX: known limitations: IOSQE_IO_LINK maximum batch size = 8
 // XXX: never use IOSQE_IO_HARDLINK without IOSQE_IO_LINK, or
 // any flag that implies IOSQE_IO_LINK
@@ -32,9 +33,9 @@
 #include <iel_priv/quep.h>
 
 #ifdef NDEBUG
-#define DBG(...) ;
+#define DBG(...) ((void) 0)
 #else
-#define DBG(...) fprintf(stderr, __VA_ARGS__);
+#define DBG(...) (fprintf(stderr, __VA_ARGS__))
 #endif
 
 #define SQOFQ_CHUNK_SZ_BIT 10
@@ -42,30 +43,6 @@ static_assert(SQOFQ_CHUNK_SZ_BIT > 3, "Chunk too small");
 #define IEL_QUE_IMPL
 #define IEL_QUE_TPL (/*ChunkEntsBit=*/SQOFQ_CHUNK_SZ_BIT, /*MinChunks=*/8, /*type=*/struct io_uring_sqe, /*pfx=*/ielb_ioux_xsq_, /*sfx=*/, /*api=*/static inline, /*align=*/64,)
 #include <iel_priv/que.tpl.h>
-
-static inline
-void a16from64(unsigned long long i, char str[16]) {
-    const char hexa[] = "0123456789abcdef";
-    unsigned char j = 16;
-    while (j != 0) {
-        str[--j] = hexa[i & 0xF];
-        i >>= 4;
-    }
-}
-
-static inline
-void pu64hx(const char *hint, size_t hintlen, unsigned long long i, char e) {
-    if (hint) {
-        write(STDERR_FILENO, hint, hintlen);
-        write(STDERR_FILENO, ": ", 2);
-    }
-    char str[19];
-    str[0] = '0';
-    str[1] = 'x';
-    str[18] = e;
-    a16from64(i, &str[2]);
-    write(STDERR_FILENO, str, 19);
-}
 
 // Non-SQPOLL saturates at 64, 128 is better for SQPOLL
 #define QUEUE_DEPTH_BIT 6
@@ -95,12 +72,44 @@ int io_uring_setup(unsigned entries, struct io_uring_params *p)
 }
 
 static inline
+int io_uring_register(unsigned int fd, unsigned int opcode, void *arg, unsigned int nr_args)
+{
+    int ret = syscall(__NR_io_uring_register, fd, opcode, arg, nr_args);
+    return (ret < 0) ? -errno : ret;
+}
+
+static inline
 int io_uring_enter(int ring_fd, unsigned int to_submit,
                    unsigned int min_complete, unsigned int flags)
 {
     int ret = syscall(__NR_io_uring_enter, ring_fd, to_submit,
                   min_complete, flags, NULL, 0);
     return (ret < 0) ? -errno : ret;
+}
+
+struct ielb_ioux_thsetup_cbt {
+    int res;
+    const unsigned entries;
+    struct io_uring_params * const p;
+};
+
+static
+void ielb_ioux_nop(int signo) { (void)signo; pthread_exit(NULL); }
+
+static
+void *ielb_ioux_thsetup_cb(void *_arg) {
+    struct ielb_ioux_thsetup_cbt *arg = (struct ielb_ioux_thsetup_cbt *)_arg;
+    struct sigaction oact, act = {
+        .sa_handler=&ielb_ioux_nop,
+    };
+    if (sigemptyset(&act.sa_mask) < 0)
+        return NULL;
+    if (sigaction(SIGSYS, &act, &oact) < 0)
+        return NULL;
+    arg->res = io_uring_setup(arg->entries, arg->p);
+    if (sigaction(SIGSYS, &oact, NULL) < 0)
+        return NULL;
+    return _arg;
 }
 
 /*
@@ -276,6 +285,7 @@ int ielb_iou_lrun1(void *ctx, union iel_arg_un flags) {
         unsigned real_idx = pud->sring_array[idx & pud->sring_mask];
         struct io_uring_sqe *s = &pud->mapptr_sqes[real_idx];
         DBG("  {OP=%hu,\tUD=%p}@%p\n", s->opcode, (void *)s->user_data, (void *)s);
+        (void) s;
     }
     DBG("]\n");
     // TODO: submission indirect arguments could be put into an arena, freed when submitted
@@ -288,8 +298,8 @@ int ielb_iou_lrun1(void *ctx, union iel_arg_un flags) {
      */
     st_rel(pud->sring_tail, pud->lcl_stail);
     st_rel(pud->cring_head, pud->lcl_chead);
-    int ret = io_uring_enter(pud->ring_fd, sq_len, 1,
-                              IORING_ENTER_GETEVENTS);
+    int ret = io_uring_enter(pud->ring_fd_registered, sq_len, 1,
+                             IORING_ENTER_GETEVENTS | IORING_ENTER_REGISTERED_RING);
     if (ret < 0) {
         perror("io_uring_enter");
         return ret;
@@ -413,31 +423,48 @@ int ielb_iou_lrun1(void *ctx, union iel_arg_un flags) {
     return 0;
 }
 
-static
-volatile sig_atomic_t setup_trapped = 0;
-
-int ielb_ioux_lnew_us(void *ctx, union iel_arg_un flags) {
+static inline
+int ielb_ioux_lnew_base(struct ielb_iou_ctx_st *pud, union iel_arg_un flags, unsigned char do_thread) {
     (void) flags;
-    struct ielb_iou_ctx_st *pud = (struct ielb_iou_ctx_st *)ctx;
     struct io_uring_params p;
     int sring_sz, cring_sz;
 
     /* See io_uring_setup(2) for io_uring_params.flags you can set */
     memset(&p, 0, sizeof(p));
-    setup_trapped = 0;
-    pud->ring_fd = io_uring_setup(QUEUE_DEPTH, &p);
-    if (setup_trapped) {
-        // TODO: handle errors
-        perror("io_uring_setup (blocked by SECCOMP_RET_TRAP)");
-        goto fail;
-    }
+    if (do_thread) {
+        struct ielb_ioux_thsetup_cbt arg = { .entries=QUEUE_DEPTH, .p=&p };
+        pthread_t pth;
+        int res;
+        void *tres = NULL;
+        res = pthread_create(&pth, NULL, ielb_ioux_thsetup_cb, &arg);
+        if (res) {
+            DBG("pthread_create: %s\n", strerror(res));
+            return -1;
+        }
+        res = pthread_join(pth, &tres);
+        if (res) {
+            DBG("pthread_join: %s\n", strerror(res));
+            return -1;
+        }
+        if (tres != &arg) {
+            DBG("setup thread returned failure\n");
+            return -1;
+        }
+        pud->ring_fd = arg.res;
+    } else
+        pud->ring_fd = io_uring_setup(QUEUE_DEPTH, &p);
+
     if (pud->ring_fd < 0) {
         perror("io_uring_setup");
         goto fail;
-    } else
-        DBG("io_uring_setup returned %d\n", pud->ring_fd);
-    if (!(p.features & (IORING_FEAT_NODROP | IORING_FEAT_RW_CUR_POS)))
-        goto fail_closefd;
+    }
+    DBG("ring fd: %d\n", pud->ring_fd);
+
+    {
+        unsigned required_feats = IORING_FEAT_NODROP | IORING_FEAT_RW_CUR_POS | IORING_FEAT_SUBMIT_STABLE;
+        if ((p.features & required_feats) != required_feats)
+            goto fail_closefd;
+    }
 
     /*
      * io_uring communication happens via 2 shared kernel-user space ring
@@ -518,9 +545,34 @@ int ielb_ioux_lnew_us(void *ctx, union iel_arg_un flags) {
 
     pud->lcl_stail = *pud->sring_tail;
     pud->lcl_chead = *pud->cring_head;
+
+    {
+        static const unsigned NEXT_SLOT = (unsigned)-1;
+        struct io_uring_rsrc_update reg_arg = {
+            .data=pud->ring_fd,
+            .offset=NEXT_SLOT,
+        };
+        if (io_uring_register(pud->ring_fd, IORING_REGISTER_RING_FDS, &reg_arg, 1) < 0) {
+            perror("IORING_REGISTER_RING_FDS");
+            goto fail_delxsq;
+        }
+        pud->ring_fd_registered = reg_arg.offset;
+        if (pud->ring_fd_registered == NEXT_SLOT) {
+            DBG("IORING_REGISTER_RING_FDS didn't change arg.offset");
+            goto fail_delxsq;
+        }
+        DBG("offs:%d\n", pud->ring_fd_registered);
+    }
+
     pud->feat = IEL_FEAT_AVAIL | IEL_FEAT_ETIME_MICROS | IEL_FEAT_REQLNK;
 
     return 0;
+//fail_unregring:;
+//    if (io_uring_register(pud->ring_fd, IORING_UNREGISTER_RING_FDS,
+//            &(struct io_uring_rsrc_update) { .offset=pud->ring_fd_registered }, 1) < 0)
+//        perror("IORING_UNREGISTER_RING_FDS");
+fail_delxsq:;
+    ielb_ioux_xsq_del(&pud->sqofq);
 fail_deltaskq:;
     iel_quep_del(&pud->taskque);
 fail_unmapsqes:;
@@ -533,76 +585,24 @@ fail_unmapsq:;
 fail_closefd:;
     close(pud->ring_fd);
 fail:;
-    return 1;
+    return -1;
 }
-static
-void sigactcb(int sig, siginfo_t *si, void *ctx) {
-    (void) ctx;
-    setup_trapped = 1;
-    errno = si->si_errno;
-#define P1(x) write(STDERR_FILENO, x, sizeof(x) - 1)
-#define P(x) pu64hx(#x, sizeof(#x) - 1, (unsigned long long)si->si_##x, '\n')
-    P1("oneshot SIGSYS handler\n");
-    pu64hx("_sig", 4, sig, '\n');
-    P(signo);
-    P(errno);
-    P(code);
-    P(status);
-    P(value.sival_int);
-    P(int);
-    P(ptr);
-    P(addr);
-    P(fd);
-    P(call_addr);
-    P(syscall);
-    P(arch);
-#undef P
-#undef P1
-}
-struct ielb_ioux_lnewt_arg {
-    void *ctx;
-    int res;
-};
-static
-void *ielb_ioux_lnewt_cb(void *_arg) {
-    struct ielb_ioux_lnewt_arg *arg = (struct ielb_ioux_lnewt_arg *)_arg;
-    struct sigaction sa = {
-        .sa_sigaction = sigactcb,
-        .sa_flags = SA_SIGINFO | SA_RESETHAND,
-    };
-    sigemptyset(&sa.sa_mask);
-    sigaction(SIGSYS, &sa, NULL);
-    int r = ielb_ioux_lnew_us(arg->ctx, IEL_ARG_NULL);
-    if (r)
-        DBG("erret: %d\n", r);
-    arg->res = r;
-    signal(SIGSYS, SIG_DFL);
-    return NULL;
-}
-int ielb_iou_lnew(void *ctx, union iel_arg_un flags) {
-    (void) flags;
-    pthread_t pth;
-    int res;
-    struct ielb_ioux_lnewt_arg arg = { .ctx=ctx, .res=255 };
-    void *tres;
 
-    res = pthread_create(&pth, NULL, ielb_ioux_lnewt_cb, &arg);
-    if (res) {
-        DBG("pthread_create: %s\n", strerror(res));
-        return 4;
-    }
-    res = pthread_join(pth, &tres);
-    if (res) {
-        DBG("pthread_join: %s\n", strerror(res));
-        return 3;
-    }
-    return arg.res;
+int ielb_iou_lnew(void *ctx, union iel_arg_un flags) {
+    return ielb_ioux_lnew_base((struct ielb_iou_ctx_st *)ctx, flags, 1);
+}
+
+int ielb_ioux_lnew_us(void *ctx, union iel_arg_un flags) {
+    return ielb_ioux_lnew_base((struct ielb_iou_ctx_st *)ctx, flags, 0);
 }
 
 void ielb_iou_ldel(void *ctx) {
     struct ielb_iou_ctx_st *pud = (struct ielb_iou_ctx_st *)ctx;
     ielb_ioux_xsq_del(&pud->sqofq);
     iel_quep_del(&pud->taskque);
+    if (io_uring_register(pud->ring_fd, IORING_UNREGISTER_RING_FDS,
+            &(struct io_uring_rsrc_update) { .offset=pud->ring_fd_registered }, 1) < 0)
+        perror("IORING_UNREGISTER_RING_FDS");
     munmap(pud->mapptr_sqes, pud->maplen_sqes);
     munmap(pud->mapptr_sq, pud->maplen_sq);
     if (pud->mapptr_cq != pud->mapptr_sq)
@@ -653,7 +653,7 @@ unsigned char ielb_iou_vtsetup(struct iel_vtable_st *vt) {
     if (scmode == SECCOMP_MODE_DISABLED) {
         vt->p_lnew = &ielb_ioux_lnew_us;
     } else {
-        DBG("SECCOMP_MODE_FILTER\n");
+        if (scmode == SECCOMP_MODE_FILTER) DBG("SECCOMP_MODE_FILTER\n");
         // Android (app) uses SECCOMP_RET_TRAP (syscall ret 64), and docker uses SECCOMP_RET_ERRNO | EPERM (or lsm?)
         // doesn't work for SECCOMP_RET_KILL_PROCESS
         // Note: the use of SECCOMP_RET_KILL_THREAD to kill a single thread in a multithreaded process is likely to leave the process in a permanently inconsistent and possibly corrupt state.
