@@ -10,10 +10,10 @@ union iel_arg_un {
 };
 
 #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
-#define IEL_ARG(x) _Generic(x, \
-        unsigned long long: (union iel_arg_un) { .ull = (unsigned long long)x }, \
-        void *: (union iel_arg_un) { .ptr = (void *)x }, \
-        iel_arg_fnptr: (union iel_arg_un) { .fnptr = (iel_arg_fnptr)x } \
+#define IEL_ARG(x) _Generic((x), \
+        unsigned long long: (union iel_arg_un) { .ull = (unsigned long long)(x) }, \
+        void *: (union iel_arg_un) { .ptr = (void *)(x) }, \
+        iel_arg_fnptr: (union iel_arg_un) { .fnptr = (iel_arg_fnptr)(x) } \
     )
 #endif
 

@@ -1,0 +1,4 @@
+If:
+  PathMatch: include/iel_priv/.*\.h
+CompileFlags:
+  Add: [-DIEL_BUILDING=2]

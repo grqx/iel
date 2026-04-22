@@ -1,5 +1,6 @@
-// TODO: verify iel_arg_un flags is empty and return EINVAL when invalid
-// TODO: <0 for error
+#ifdef __linux__
+// TODO: check: minimum 6.0 kernel
+// TODO: detect __STDC_NO_ATOMICS__, add build system option for en/disabling the backend
 // XXX: known limitations: IOSQE_IO_LINK maximum batch size = 8
 // XXX: never use IOSQE_IO_HARDLINK without IOSQE_IO_LINK, or
 // any flag that implies IOSQE_IO_LINK
@@ -12,16 +13,20 @@
 #include <sys/prctl.h>
 #include <linux/seccomp.h>
 #include <sys/syscall.h>
+#include <sys/resource.h>
 #include <sys/mman.h>
 #include <sys/uio.h>
 #include <unistd.h>
 
 #include <assert.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <stdatomic.h>
+#include <stdalign.h>
 #include <errno.h>
 #include <string.h>
+#include <limits.h>
 
 #include <linux/io_uring.h>
 
@@ -31,6 +36,7 @@
 #include <iel/tagptr.h>
 #include <iel/errno.h>
 #include <iel_priv/quep.h>
+#include <iel_priv/bitmap.h>
 
 #ifdef NDEBUG
 #define DBG(...) ((void) 0)
@@ -54,6 +60,8 @@ static_assert(QUEUE_DEPTH_BIT > 3, "Queue too small");
 #define ld_acq(atomic_p) atomic_load_explicit(atomic_p, memory_order_acquire)
 #define st_rlx(atomic_p, new_val) atomic_store_explicit(atomic_p, new_val, memory_order_relaxed)
 #define st_rel(atomic_p, new_val) atomic_store_explicit(atomic_p, new_val, memory_order_release)
+
+#define IOU_FEATS (IEL_FEAT_AVAIL | IEL_FEAT_ETIME_MICROS | IEL_FEAT_REQLNK | IEL_FEAT_NOREG_HANDLE)
 
 size_t (ielb_iou_lsize)(void) {
     return ielb_iou_lsize();  // use the macro
@@ -80,56 +88,143 @@ int io_uring_register(unsigned int fd, unsigned int opcode, void *arg, unsigned 
 
 static inline
 int io_uring_enter(int ring_fd, unsigned int to_submit,
-                   unsigned int min_complete, unsigned int flags)
+                   unsigned int min_complete, unsigned int flags, void *arg, size_t sz)
 {
-    int ret = syscall(__NR_io_uring_enter, ring_fd, to_submit,
-                  min_complete, flags, NULL, 0);
-    return (ret < 0) ? -errno : ret;
+    do {
+        int ret = syscall(__NR_io_uring_enter, ring_fd, to_submit, min_complete,
+                          flags, arg, sz);
+        if IEL_LIKELY (ret >= 0)
+            return ret;
+        else if (errno == EINTR) {
+            DBG("io_uring_enter: EINTR\n");
+            continue;
+        }
+        else
+            return -errno;
+    } while (1);
 }
 
-struct ielb_ioux_thsetup_cbt {
-    int res;
-    const unsigned entries;
-    struct io_uring_params * const p;
-};
+static inline
+iel_taskres ielb_ioux_regfiles(struct ielb_iou_ctx_st *pud, iel_pf_reg_fd const *fds, iel_pf_reg_fd *out, size_t nr_args) {
+    static_assert(IEL_PF_FD_R_INVAL == IEL_PF_SOCKFD_R_INVAL, "sock/fd r inval should equal");
+    iel_taskres err_ret = IOU_FEATS & IEL_FEAT_NOREG_HANDLE ? 0 : -1;
 
-static
-void ielb_ioux_nop(int signo) { (void)signo; pthread_exit(NULL); }
+    if (!pud->filetable_len) {
+        for (size_t i = 0; i < nr_args; ++i)
+            out[i].reg = IEL_PF_FD_R_INVAL;
+        return iel_errno = IEL_ENOBUFS, err_ret;
+    }
 
-static
-void *ielb_ioux_thsetup_cb(void *_arg) {
-    struct ielb_ioux_thsetup_cbt *arg = (struct ielb_ioux_thsetup_cbt *)_arg;
-    struct sigaction oact, act = {
-        .sa_handler=&ielb_ioux_nop,
-    };
-    if (sigemptyset(&act.sa_mask) < 0)
-        return NULL;
-    if (sigaction(SIGSYS, &act, &oact) < 0)
-        return NULL;
-    arg->res = io_uring_setup(arg->entries, arg->p);
-    if (sigaction(SIGSYS, &oact, NULL) < 0)
-        return NULL;
-    return _arg;
+    if IEL_UNLIKELY (!nr_args)
+        return iel_errno = 0, 0;
+
+    size_t i = 0, it = 0, bmsz = (pud->filetable_len + IEL_BM_BITS_IN_ELEM - 1) / IEL_BM_BITS_IN_ELEM;
+    do {
+        size_t idx = iel_bm_scan_clear((iel_bm_elem *)pud->filetable_bitmap, bmsz, &it);
+
+        if (idx == IEL_BM_NPOS) {
+            --i;
+            iel_errno = IEL_ENOBUFS;
+            goto nobufs;
+        }
+
+        pud->filetable[idx] = fds[i].raw;
+        out[i].raw = fds[i].raw;
+        out[i].reg = idx;
+        ++i;
+    } while (i < nr_args && it < bmsz);
+
+    {
+        struct io_uring_rsrc_update upd = {
+            .offset=0,
+            .data=(uint64_t)pud->filetable,
+        };
+        /* TODO: dereg + close taking regfd as xreg opcode f/s? */
+        if (io_uring_register(pud->ring_fd, IORING_REGISTER_FILES_UPDATE, &upd, pud->filetable_len) < 0) {
+            perror("iou/xreg reg: IORING_REGISTER_FILES_UPDATE");
+            iel_errno = IEL_E_NOIMPL;
+            goto nobufs;
+        }
+    }
+
+    return nr_args;
+
+nobufs:;
+    while (i != SIZE_MAX) {
+        iel_bm_set((iel_bm_elem *)pud->filetable_bitmap, bmsz, out[i].reg);
+        pud->filetable[out[i].reg] = -1;
+        out[i].reg = IEL_PF_FD_R_INVAL;
+        --i;
+    }
+    return err_ret;
+}
+
+iel_taskres ielb_iou_xreg(void *ctx, unsigned char opcode, void const * IEL_CQUAL_RESTRICT in, void * IEL_CQUAL_RESTRICT out, size_t nr_args, union iel_arg_un flags) {
+    struct ielb_iou_ctx_st *pud = (struct ielb_iou_ctx_st *)ctx;
+    iel_errno = IEL_E_NOIMPL;
+    switch (opcode) {
+        case IEL_XREG_FILES:;
+        case IEL_XREG_SOCKETS:;
+            if (flags.ull)
+                return iel_errno = IEL_EINVAL, -1;
+            return ielb_ioux_regfiles(pud, (iel_pf_reg_fd const *)(in ? in : out), (iel_pf_reg_fd *)out, nr_args);
+        case IEL_XREG_DE_FILES:;
+        case IEL_XREG_DE_SOCKETS:;
+        {
+            if (nr_args != 1)
+                return iel_errno = IEL_EINVAL, -1;
+            iel_pf_reg_fd const *fd = (iel_pf_reg_fd const *)in;
+
+            if (flags.ull & IEL_FLAG_XREG_DRG) {
+                iel_pf_fd_r fd_r = fd->reg;
+                pud->filetable[fd_r] = -1;
+                struct io_uring_rsrc_update upd = {
+                    .offset=0,
+                    .data=(uint64_t)pud->filetable,
+                };
+                if (io_uring_register(
+                        pud->ring_fd, IORING_REGISTER_FILES_UPDATE, &upd,
+                        pud->filetable_len) < 0) {
+                    perror("iou/xreg dereg: IORING_REGISTER_FILES_UPDATE");
+                    return iel_errno = IEL_E_NOIMPL, -1;
+                }
+                iel_bm_set(
+                    (iel_bm_elem *)pud->filetable_bitmap,
+                    (pud->filetable_len + IEL_BM_BITS_IN_ELEM - 1) / IEL_BM_BITS_IN_ELEM,
+                    fd_r);
+            }
+            if (flags.ull & IEL_FLAG_XREG_DEL) {
+                int res = close(fd->raw);
+                if (res < 0) {
+                    perror("iou/xreg close: IORING_REGISTER_FILES_UPDATE");
+                    return iel_errno = IEL_E_NOIMPL, res;
+                }
+            }
+            return 1;
+        }
+        default:;
+            break;
+    }
+    return iel_errno = IEL_EINVAL, -1;
 }
 
 /*
-* Submit a read or a write request to the submission queue.
-* */
+ * Submit a request to the submission queue.
+ * */
 static inline
 void *submit_to_sq(struct ielb_iou_ctx_st *pud, unsigned char op, int fd, long long off, unsigned long long addr, unsigned int len, void *user_data, unsigned long long flags) {
     // TODO: handle CQ overflow/-EBUSY? see IORING_FEAT_NODROP in io_uring_setup(2)
     unsigned tail = pud->lcl_stail;
     unsigned sq_ents = (unsigned)(tail - ld_acq(pud->sring_head));
     struct io_uring_sqe *sqe;
+
+    if IEL_UNLIKELY (flags & ~(IEL_FLAG_NOREG_HANDLE | IEL_FLAG_REQLNK))
+        return iel_errno = IEL_EINVAL, NULL;
+
     if (sq_ents == pud->sring_mask + 1) {  // SQ full
         sqe = ielb_ioux_xsq_rsv1(&pud->sqofq);
-        if (!sqe) {
-            iel_cb cb = *(iel_cb *)iel_tp_untag(user_data, IEL_CB_ALIGN).ptr;
-
-            cb(user_data, -ENOMEM);
-            iel_errno = IEL_ENOMEM;
-            return NULL;
-        }
+        if (!sqe)
+            return iel_errno = IEL_ENOMEM, NULL;
         DBG("sq full!\n");
     } else {
         unsigned index;
@@ -141,51 +236,64 @@ void *submit_to_sq(struct ielb_iou_ctx_st *pud, unsigned char op, int fd, long l
         /* Update the tail */
         ++pud->lcl_stail;
     }
-    /* Fill in the parameters required for the read or write operation */
-    memset(sqe, 0, 64);
-    sqe->flags = flags & IEL_FEAT_REQLNK ? IOSQE_IO_LINK | IOSQE_CQE_SKIP_SUCCESS : 0;
+
+    /* Fill in the parameters required for the operation */
     sqe->opcode = op;
+
+    sqe->flags = IOSQE_FIXED_FILE;
+    if IEL_UNLIKELY (flags & IEL_FLAG_REQLNK)
+        sqe->flags |= IOSQE_IO_LINK | IOSQE_CQE_SKIP_SUCCESS;
+    if (flags & IEL_FLAG_NOREG_HANDLE)
+        sqe->flags &= ~IOSQE_FIXED_FILE;
+
+    sqe->ioprio = 0;
     sqe->fd = fd;
+    sqe->off = (unsigned long long)off;
     sqe->addr = addr;
     sqe->len = len;
-    sqe->off = (unsigned long long)off;
+    sqe->rw_flags = 0;
     sqe->user_data = (unsigned long long)user_data;
+    // other unused fields
+    sqe->buf_index = sqe->personality = sqe->file_index = sqe->optval = 0;
+
+    DBG("submit opc %d, flags %d, fd: %d\n", sqe->opcode, sqe->flags, sqe->fd);
+
     // TODO: flush immediately if SQPOLL(?)
 
     return user_data;
 }
 
 
-void *ielb_iou_fpr(void *ctx, iel_pf_fd fd, const unsigned char *buf, size_t count, iel_pf_pos offset, union iel_arg_un flags, void *cbp) {
+void *ielb_iou_fpr(void *ctx, iel_pf_fd_r fd, const unsigned char *buf, size_t count, iel_pf_pos offset, union iel_arg_un flags, void *cbp) {
     return submit_to_sq((struct ielb_iou_ctx_st *)ctx, IORING_OP_READ, fd, offset, (unsigned long long)buf, count, cbp, flags.ull);
 }
-void *ielb_iou_fprv(void *ctx, iel_pf_fd fd, iel_pf_iov *iovecs, size_t iovcnt, iel_pf_pos offset, union iel_arg_un flags, void *cbp) {
+void *ielb_iou_fprv(void *ctx, iel_pf_fd_r fd, iel_pf_iov *iovecs, size_t iovcnt, iel_pf_pos offset, union iel_arg_un flags, void *cbp) {
     return submit_to_sq((struct ielb_iou_ctx_st *)ctx, IORING_OP_READV, fd, offset, (unsigned long long)iovecs, iovcnt, cbp, flags.ull);
 }
-void *ielb_iou_fpw(void *ctx, iel_pf_fd fd, const unsigned char *buf, size_t count, iel_pf_pos offset, union iel_arg_un flags, void *cbp) {
+void *ielb_iou_fpw(void *ctx, iel_pf_fd_r fd, const unsigned char *buf, size_t count, iel_pf_pos offset, union iel_arg_un flags, void *cbp) {
     return submit_to_sq((struct ielb_iou_ctx_st *)ctx, IORING_OP_WRITE, fd, offset, (unsigned long long)buf, count, cbp, flags.ull);
 }
-void *ielb_iou_fpwv(void *ctx, iel_pf_fd fd, iel_pf_iov *iovecs, size_t iovcnt, iel_pf_pos offset, union iel_arg_un flags, void *cbp) {
+void *ielb_iou_fpwv(void *ctx, iel_pf_fd_r fd, iel_pf_iov *iovecs, size_t iovcnt, iel_pf_pos offset, union iel_arg_un flags, void *cbp) {
     return submit_to_sq((struct ielb_iou_ctx_st *)ctx, IORING_OP_WRITEV, fd, offset, (unsigned long long)iovecs, iovcnt, cbp, flags.ull);
 }
 
-void *ielb_ioux_r(void *ctx, iel_pf_fd fd, const unsigned char *buf, size_t count, union iel_arg_un flags, void *cbp) {
+void *ielb_ioux_r(void *ctx, iel_pf_fd_r fd, const unsigned char *buf, size_t count, union iel_arg_un flags, void *cbp) {
     return submit_to_sq((struct ielb_iou_ctx_st *)ctx, IORING_OP_READ, fd, (unsigned long long)-1, (unsigned long long)buf, count, cbp, flags.ull);
 }
-void *ielb_ioux_rv(void *ctx, iel_pf_fd fd, iel_pf_iov *iov, size_t iovcnt, union iel_arg_un flags, void *cbp) {
+void *ielb_ioux_rv(void *ctx, iel_pf_fd_r fd, iel_pf_iov *iov, size_t iovcnt, union iel_arg_un flags, void *cbp) {
     return submit_to_sq((struct ielb_iou_ctx_st *)ctx, IORING_OP_READV, fd, (unsigned long long)-1, (unsigned long long)iov, iovcnt, cbp, flags.ull);
 }
-void *ielb_ioux_w(void *ctx, iel_pf_fd fd, const unsigned char *buf, size_t count, union iel_arg_un flags, void *cbp) {
+void *ielb_ioux_w(void *ctx, iel_pf_fd_r fd, const unsigned char *buf, size_t count, union iel_arg_un flags, void *cbp) {
     return submit_to_sq((struct ielb_iou_ctx_st *)ctx, IORING_OP_WRITE, fd, (unsigned long long)-1, (unsigned long long)buf, count, cbp, flags.ull);
 }
-void *ielb_ioux_wv(void *ctx, iel_pf_fd fd, iel_pf_iov *iov, size_t iovcnt, union iel_arg_un flags, void *cbp) {
+void *ielb_ioux_wv(void *ctx, iel_pf_fd_r fd, iel_pf_iov *iov, size_t iovcnt, union iel_arg_un flags, void *cbp) {
     return submit_to_sq((struct ielb_iou_ctx_st *)ctx, IORING_OP_WRITEV, fd, (unsigned long long)-1, (unsigned long long)iov, iovcnt, cbp, flags.ull);
 }
 
-void *ielb_iou_sa(void *ctx, iel_pf_sockfd fd, iel_pf_sockaf *addr_out, iel_pf_socklen *addrlen_out, union iel_arg_un flags, void *cbp) {
+void *ielb_iou_sa(void *ctx, iel_pf_sockfd_r fd, iel_pf_sockaf *addr_out, iel_pf_socklen *addrlen_out, union iel_arg_un flags, void *cbp) {
     return submit_to_sq((struct ielb_iou_ctx_st *)ctx, IORING_OP_ACCEPT, fd, (unsigned long long)addrlen_out, (unsigned long long)addr_out, 0, cbp, flags.ull);
 }
-void *ielb_iou_sc(void *ctx, iel_pf_sockfd fd, iel_pf_sockaf *addr, iel_pf_socklen addrlen, union iel_arg_un flags, void *cbp) {
+void *ielb_iou_sc(void *ctx, iel_pf_sockfd_r fd, iel_pf_sockaf *addr, iel_pf_socklen addrlen, union iel_arg_un flags, void *cbp) {
     return submit_to_sq((struct ielb_iou_ctx_st *)ctx, IORING_OP_CONNECT, fd, (unsigned long long)addrlen, (unsigned long long)addr, 0, cbp, flags.ull);
 }
 
@@ -196,87 +304,77 @@ struct ielb_ioux_etime_cbt {
 };
 
 static
-void ielb_ioux_etime_cb(void *_self, int res) {
-    iel_cb cb_inner;
+void ielb_ioux_etime_cb(void *_self, iel_taskres res) {
+    iel_cb user_cb;
     void *user_data;
     {
         struct ielb_ioux_etime_cbt *cbp = (struct ielb_ioux_etime_cbt *)_self;
         user_data = cbp->user_data;
 
-        cb_inner = *(iel_cb *)iel_tp_untag(user_data, IEL_CB_ALIGN).ptr;
+        user_cb = ((struct iel_cb_base *)iel_tp_untag(user_data, IEL_CB_ALIGN).ptr)->cb;
 
         free(cbp);
     }
-    cb_inner(user_data, res == -ETIME ? 0 : res);
+    user_cb(user_data, res == -ETIME ? 0 : res);
 }
 
 void *ielb_iou_etime(void *ctx, unsigned long long time, union iel_arg_un flags, void *user_data) {
     struct ielb_iou_ctx_st *pud = (struct ielb_iou_ctx_st *)ctx;
     struct ielb_ioux_etime_cbt *wcbp = (struct ielb_ioux_etime_cbt *)malloc(sizeof(struct ielb_ioux_etime_cbt));
-    if (!wcbp) {
-        iel_cb cb = *(iel_cb *)iel_tp_untag(user_data, IEL_CB_ALIGN).ptr;
-        cb(user_data, -ENOMEM);
-        iel_errno = IEL_ENOMEM;
-        return NULL;
-    }
+    if (!wcbp)
+        return iel_errno = IEL_ENOMEM, NULL;
     if (flags.ull & IEL_FLAG_ETIME_MICROS) {
-        flags.ull &= ~IEL_FLAG_ETIME_MICROS;
         wcbp->ts.tv_sec = time / 1000000;
         wcbp->ts.tv_nsec = (time % 1000000) * 1000;
     } else {
         wcbp->ts.tv_sec = time / 1000;
         wcbp->ts.tv_nsec = (time % 1000) * 1000000;
     }
-    if (flags.ull) {
-        iel_cb cb;
-
+    if (flags.ull & ~IEL_FLAG_ETIME_MICROS) {
         free(wcbp);
-        cb = *(iel_cb *)iel_tp_untag(user_data, IEL_CB_ALIGN).ptr;
-        cb(user_data, -EINVAL);
-        iel_errno = IEL_EINVAL;
-        return NULL;
+        return iel_errno = IEL_EINVAL, NULL;
     }
-    wcbp->base = &ielb_ioux_etime_cb;
+    wcbp->base.cb = &ielb_ioux_etime_cb;
     wcbp->user_data = user_data;
 
-    return submit_to_sq(pud, IORING_OP_TIMEOUT, 0, 0, (unsigned long long)&wcbp->ts, 1, &wcbp->base, 0);
+    return submit_to_sq(pud, IORING_OP_TIMEOUT, 0, 0, (unsigned long long)&wcbp->ts, 1, &wcbp->base, IEL_FLAG_NOREG_HANDLE);
 }
 
 void *ielb_iou_esoon(void *ctx, union iel_arg_un flags, void *user_data) {
-    (void) flags;
     struct ielb_iou_ctx_st *pud = (struct ielb_iou_ctx_st *)ctx;
-#if 0  // TODO: update to use iel_cb *
-    void **pout = iel_quep_rsv1(&pud->taskque);
-    if (!pout) {
-        iel_cbp cbp = (iel_cbp)iel_tp_untag(user_data, IEL_CB_ALIGN).ptr;
-
-        cbp->cb(user_data, -ENOMEM);
-        iel_errno = IEL_ENOMEM;
-        return NULL;
-    }
-    *pout = user_data;
-    return user_data;
-#else
-    return submit_to_sq(pud, IORING_OP_NOP, 0, 0, 0, 0, user_data, 0);
-#endif
+    if IEL_UNLIKELY (flags.ull & ~IEL_FLAG_ESOON_NEXT)
+        return iel_errno = IEL_EINVAL, NULL;
+    void **pout = iel_quep_rsv1(flags.ull & IEL_FLAG_ESOON_NEXT ? &pud->prepque : &pud->soonque);
+    if IEL_UNLIKELY (!pout)
+        return iel_errno = IEL_ENOMEM, NULL;
+    return *pout = user_data;
 }
 
 static inline
-void ielb_ioux_drainque(struct iel_que_st *que) {
-    void *task;
+void ielb_ioux_exeq(struct iel_que_st *que) {
+    iel_que_idx chunk_stop = que->chunk_e;
+    iel_que_offset os_stop = que->os_e;
     while (1) {
-        if (iel_quep_pop1(que, &task) < 0) break;
-        iel_cb cb = *(iel_cb *)iel_tp_untag(task, IEL_CB_ALIGN).ptr;
-        cb(task, 0);
-    }
-    iel_quep_qtrim(que);
+        void *task;
+        int res = iel_quep_pop1(que, &task, chunk_stop, os_stop);
+        if IEL_UNLIKELY (res < 0) break;  // empty
+
+        iel_cb user_cb = ((struct iel_cb_base *)iel_tp_untag(task, IEL_CB_ALIGN).ptr)->cb;
+        user_cb(task, 0);
+
+        if IEL_UNLIKELY (res > 0) break;  // last
+    };
 }
 
 int ielb_iou_lrun1(void *ctx, union iel_arg_un flags) {
-    (void) flags;
     struct ielb_iou_ctx_st *pud = (struct ielb_iou_ctx_st *)ctx;
+    size_t xsq_sz;
     unsigned sq_len;
-    ielb_ioux_drainque(&pud->taskque);
+    DBG("enter lrun1\n");
+    if IEL_UNLIKELY (flags.ull)
+        return iel_errno = IEL_EINVAL, -1;
+    ielb_ioux_exeq(&pud->prepque);
+    ielb_ioux_exeq(&pud->soonque);
 
     // relaxed as no synchronisation required
     sq_len = pud->lcl_stail - ld_rlx(pud->sring_head);
@@ -298,14 +396,28 @@ int ielb_iou_lrun1(void *ctx, union iel_arg_un flags) {
      */
     st_rel(pud->sring_tail, pud->lcl_stail);
     st_rel(pud->cring_head, pud->lcl_chead);
-    int ret = io_uring_enter(pud->ring_fd_registered, sq_len, 1,
-                             IORING_ENTER_GETEVENTS | IORING_ENTER_REGISTERED_RING);
-    if (ret < 0) {
-        perror("io_uring_enter");
-        return ret;
-    }
 
-    size_t xsq_sz = ielb_ioux_xsq_size(&pud->sqofq);
+    struct timespec ts = {
+        .tv_sec=0,
+        .tv_nsec=0,
+    };
+    struct io_uring_getevents_arg gearg = {
+        .sigmask=(uint64_t)NULL,
+        .sigmask_sz=0,
+        .ts=(uint64_t)NULL,
+    };
+    if (iel_quep_size(&pud->soonque) || iel_quep_size(&pud->prepque)) {
+        DBG("zeroing timeout\n");
+        gearg.ts = (uint64_t) &ts;
+    }
+    int ret = io_uring_enter(pud->ring_fd_registered, sq_len, 1,
+                             IORING_ENTER_GETEVENTS | IORING_ENTER_REGISTERED_RING | IORING_ENTER_EXT_ARG,
+                             &gearg, sizeof(struct io_uring_getevents_arg));
+    if (gearg.ts == (uint64_t)&ts) goto out;
+    if IEL_UNLIKELY (ret < 0)
+        return iel_errno = -ret, -1;
+
+    xsq_sz = ielb_ioux_xsq_size(&pud->sqofq);
     DBG("XSQ has %zu; reading from cq %u entries\n", xsq_sz, ld_acq(pud->cring_tail) - pud->lcl_chead);
     if (xsq_sz) {
         unsigned safe_popsz;
@@ -323,10 +435,10 @@ int ielb_iou_lrun1(void *ctx, union iel_arg_un flags) {
             current_chunk = ((struct io_uring_sqe **)pud->sqofq.map)[chunk_tail];
             while (1) {
                 unsigned char flags = current_chunk[os_tail].flags;
-                if (!(flags & IOSQE_IO_LINK))
+                if IEL_UNLIKELY (!(flags & IOSQE_IO_LINK))
                     break;
 
-                if (!os_tail--)
+                if IEL_UNLIKELY (!os_tail--)
                     current_chunk = ((struct io_uring_sqe **)pud->sqofq.map)[--chunk_tail];
                 os_tail &= ((1ULL << SQOFQ_CHUNK_SZ_BIT) - 1);
             };
@@ -358,7 +470,7 @@ int ielb_iou_lrun1(void *ctx, union iel_arg_un flags) {
                 unsigned arr_idx = idx & pud->sring_mask;
                 pud->sring_array[arr_idx] = arr_idx;
             } while (++idx != loop_end);
-            // TODO: pop to sqes[0], and fill indirection array accordingly
+            // TODO: pop to sqes[0], and fill indirection array accordingly?
         }
         {
             struct io_uring_sqe *arr_out;
@@ -404,13 +516,14 @@ int ielb_iou_lrun1(void *ctx, union iel_arg_un flags) {
     }
 
     while (1) {
-        /* Get the entry */
+        /* Assuming CQ non-empty, get the entry */
         struct io_uring_cqe const *cqe = &pud->cqes[pud->lcl_chead & pud->cring_mask];
 
-        if (cqe->user_data) {
-            DBG("C: %p\n", (void *)cqe->user_data);
-            iel_cb cb = *(iel_cb *)iel_tp_untag((void *)cqe->user_data, IEL_CB_ALIGN).ptr;
-            cb((void *)cqe->user_data, cqe->res);
+        void *user_data = (void *)cqe->user_data;
+        DBG("[iou@%p] C: %p; %td\n", (void *)pud, user_data, (ptrdiff_t)cqe->res);
+        if (user_data) {
+            iel_cb user_cb = ((struct iel_cb_base *)iel_tp_untag(user_data, IEL_CB_ALIGN).ptr)->cb;
+            user_cb(user_data, cqe->res);
         }
 
         ++pud->lcl_chead;
@@ -418,16 +531,49 @@ int ielb_iou_lrun1(void *ctx, union iel_arg_un flags) {
         /* CQ empty */
         if (pud->lcl_chead == ld_acq(pud->cring_tail)) break;
 
-        ielb_ioux_drainque(&pud->taskque);
+        ielb_ioux_exeq(&pud->soonque);
     }
+
+out:;
+    DBG("lrun1 normal exit\n");
     return 0;
 }
 
+struct ielb_ioux_thsetup_cbt {
+    int res;
+    const unsigned entries;
+    struct io_uring_params * const p;
+};
+
+static
+void ielb_ioux_nop(int signo) { (void)signo; pthread_exit(NULL); }
+
+static
+void *ielb_ioux_thsetup_cb(void *_arg) {
+    struct ielb_ioux_thsetup_cbt *arg = (struct ielb_ioux_thsetup_cbt *)_arg;
+    struct sigaction oact, act = {
+        .sa_handler=&ielb_ioux_nop,
+    };
+    if (sigemptyset(&act.sa_mask) < 0)
+        return NULL;
+    if (sigaction(SIGSYS, &act, &oact) < 0)
+        return NULL;
+    arg->res = io_uring_setup(arg->entries, arg->p);
+    if (sigaction(SIGSYS, &oact, NULL) < 0)
+        return NULL;
+    return _arg;
+}
+
 static inline
-int ielb_ioux_lnew_base(struct ielb_iou_ctx_st *pud, union iel_arg_un flags, unsigned char do_thread) {
-    (void) flags;
+int ielb_ioux_lnew_base(struct ielb_iou_ctx_st *pud, long max_files, long max_bufs, union iel_arg_un flags, unsigned char do_thread) {
+    // TODO: max_bufs
+    (void) max_bufs;
+
     struct io_uring_params p;
     int sring_sz, cring_sz;
+
+    if IEL_UNLIKELY (flags.ull)
+        return -1;
 
     /* See io_uring_setup(2) for io_uring_params.flags you can set */
     memset(&p, 0, sizeof(p));
@@ -537,11 +683,14 @@ int ielb_ioux_lnew_base(struct ielb_iou_ctx_st *pud, union iel_arg_un flags, uns
     pud->cring_mask = *PTR_OFFSET(pud->mapptr_cq, p.cq_off.ring_mask, unsigned *);
     pud->cqes = PTR_OFFSET(pud->mapptr_cq, p.cq_off.cqes, struct io_uring_cqe *);
 
-    if (iel_quep_init(&pud->taskque, 0) < 0)
+    if (iel_quep_init(&pud->soonque, 0) < 0)
         goto fail_unmapsqes;
 
+    if (iel_quep_init(&pud->prepque, 0) < 0)
+        goto fail_delsoonque;
+
     if (ielb_ioux_xsq_init(&pud->sqofq, 0) < 0)
-        goto fail_deltaskq;
+        goto fail_delprepque;
 
     pud->lcl_stail = *pud->sring_tail;
     pud->lcl_chead = *pud->cring_head;
@@ -564,17 +713,67 @@ int ielb_ioux_lnew_base(struct ielb_iou_ctx_st *pud, union iel_arg_un flags, uns
         DBG("offs:%d\n", pud->ring_fd_registered);
     }
 
-    pud->feat = IEL_FEAT_AVAIL | IEL_FEAT_ETIME_MICROS | IEL_FEAT_REQLNK;
+    {
+        struct rlimit rlres;
+        if (getrlimit(RLIMIT_NOFILE, &rlres) < 0) {
+            perror("getrlimit");
+            goto fail_unregring;
+        }
+        unsigned long max_allowed = rlres.rlim_cur < (1UL << 20) ? rlres.rlim_cur : (1UL << 20);
+        if (max_files == -1)
+            max_files = max_allowed;
+        else if (max_files > 0)
+            max_files = max_allowed < max_files ? max_allowed : max_files;
+        else if (max_files == 0) {
+            pud->filetable_len = 0;
+            goto no_prealloc_file;
+        }
+        else
+            goto fail_unregring;
+
+        pud->filetable_len = max_files;
+        pud->filetable = (iel_pf_fd *)malloc(pud->filetable_len * sizeof(iel_pf_fd));
+        if (!pud->filetable)
+            goto fail_unregring;
+
+        size_t bm_len = (pud->filetable_len + IEL_BM_BITS_IN_ELEM - 1) / IEL_BM_BITS_IN_ELEM;
+        pud->filetable_bitmap = malloc(bm_len * sizeof(iel_bm_elem));
+        if (!pud->filetable_bitmap)
+            goto fail_freeft;
+
+        for (size_t i = 0; i < pud->filetable_len; ++i)
+            pud->filetable[i] = -1;
+        for (size_t i = 0; i < bm_len; ++i)
+            ((iel_bm_elem *)pud->filetable_bitmap)[i] = IEL_BM_ELEM_MAX;
+
+        if (io_uring_register(pud->ring_fd, IORING_REGISTER_FILES, pud->filetable, max_files) < 0) {
+            perror("IORING_REGISTER_FILES");
+            goto fail_freeftbm;
+        }
+        fprintf(stderr, "managed to register %zu file slots\n", (size_t)max_files);
+    }
+no_prealloc_file:;
+
+    pud->feat = IOU_FEATS;
 
     return 0;
-//fail_unregring:;
-//    if (io_uring_register(pud->ring_fd, IORING_UNREGISTER_RING_FDS,
-//            &(struct io_uring_rsrc_update) { .offset=pud->ring_fd_registered }, 1) < 0)
-//        perror("IORING_UNREGISTER_RING_FDS");
+//fail_unregfile:;
+//    if (pud->filetable_len && io_uring_register(pud->ring_fd, IORING_UNREGISTER_FILES, NULL, 0) < 0)
+//        perror("IORING_UNREGISTER_FILES");
+fail_freeftbm:;
+    free(pud->filetable_bitmap);
+fail_freeft:;
+    free(pud->filetable);
+fail_unregring:;
+    if (io_uring_register(pud->ring_fd, IORING_UNREGISTER_RING_FDS,
+            &(struct io_uring_rsrc_update) { .offset=pud->ring_fd_registered }, 1) < 0)
+        perror("IORING_UNREGISTER_RING_FDS");
 fail_delxsq:;
     ielb_ioux_xsq_del(&pud->sqofq);
-fail_deltaskq:;
-    iel_quep_del(&pud->taskque);
+fail_delprepque:;
+    iel_quep_del(&pud->prepque);
+fail_delsoonque:;
+    iel_quep_del(&pud->soonque);
 fail_unmapsqes:;
     munmap(pud->mapptr_sqes, pud->maplen_sqes);
 fail_unmapcq:;
@@ -588,21 +787,28 @@ fail:;
     return -1;
 }
 
-int ielb_iou_lnew(void *ctx, union iel_arg_un flags) {
-    return ielb_ioux_lnew_base((struct ielb_iou_ctx_st *)ctx, flags, 1);
+int ielb_iou_lnew(void *ctx, long max_files, long max_bufs, union iel_arg_un flags) {
+    return ielb_ioux_lnew_base((struct ielb_iou_ctx_st *)ctx, max_files, max_bufs, flags, 1);
 }
 
-int ielb_ioux_lnew_us(void *ctx, union iel_arg_un flags) {
-    return ielb_ioux_lnew_base((struct ielb_iou_ctx_st *)ctx, flags, 0);
+int ielb_ioux_lnew_us(void *ctx, long max_files, long max_bufs, union iel_arg_un flags) {
+    return ielb_ioux_lnew_base((struct ielb_iou_ctx_st *)ctx, max_files, max_bufs, flags, 0);
 }
 
 void ielb_iou_ldel(void *ctx) {
     struct ielb_iou_ctx_st *pud = (struct ielb_iou_ctx_st *)ctx;
-    ielb_ioux_xsq_del(&pud->sqofq);
-    iel_quep_del(&pud->taskque);
+    if (pud->filetable_len && io_uring_register(pud->ring_fd, IORING_UNREGISTER_FILES, NULL, 0) < 0)
+        perror("IORING_UNREGISTER_FILES");
+    free(pud->filetable_bitmap);
+    free(pud->filetable);
     if (io_uring_register(pud->ring_fd, IORING_UNREGISTER_RING_FDS,
             &(struct io_uring_rsrc_update) { .offset=pud->ring_fd_registered }, 1) < 0)
         perror("IORING_UNREGISTER_RING_FDS");
+
+    ielb_ioux_xsq_del(&pud->sqofq);
+    iel_quep_del(&pud->prepque);
+    iel_quep_del(&pud->soonque);
+
     munmap(pud->mapptr_sqes, pud->maplen_sqes);
     munmap(pud->mapptr_sq, pud->maplen_sq);
     if (pud->mapptr_cq != pud->mapptr_sq)
@@ -623,12 +829,11 @@ union iel_arg_un ielb_iou_xcntl(void *ctx, unsigned short op, union iel_arg_un a
     }
 }
 
-const unsigned long long ielb_iou_cap = IEL_FEAT_AVAIL | IEL_FEAT_ETIME_MICROS;
+const unsigned long long ielb_iou_cap = IOU_FEATS;
 
 unsigned long long ielb_iou_xfeat(void *ctx, union iel_arg_un flags) {
-    (void) flags;
     struct ielb_iou_ctx_st *pud = (struct ielb_iou_ctx_st *)ctx;
-    if (!ctx) return 0;
+    if IEL_UNLIKELY (!ctx || flags.ull) return 0;
     return pud->feat;
 }
 
@@ -637,14 +842,8 @@ void (ielb_ioux_nop_a)(union iel_arg_un flags) {
 }
 
 unsigned char ielb_iou_vtsetup(struct iel_vtable_st *vt) {
-#ifndef __linux__
-    (void) vt;
-    return IEL_VTSETUP_RET_UNAVAIL;
-#else
-    if (!vt) {
-        errno = EINVAL;
-        return IEL_VTSETUP_RET_ERROR;
-    }
+    if (!vt)
+        return iel_errno = IEL_EINVAL, IEL_VTSETUP_RET_ERROR;
 #define IEL_BACKEND_FNS_ITER(name) vt->p_ ## name = &ielb_iou_ ## name;
     IEL_BACKEND_FNS
 
@@ -662,5 +861,14 @@ unsigned char ielb_iou_vtsetup(struct iel_vtable_st *vt) {
 #undef IEL_BACKEND_FNS_ITER
 
     return IEL_VTSETUP_RET_UNSURE;
-#endif /* ifndef __linux__ */
 }
+
+#else  /* ifdef __linux__ */
+#include <iel/arg.h>
+#include <iel/backends.h>
+#include <iel/backends/iou.h>
+unsigned char ielb_iou_vtsetup(struct iel_vtable_st *vt) {
+    (void) vt;
+    return IEL_VTSETUP_RET_UNAVAIL;
+}
+#endif  /* ifdef __linux__ */

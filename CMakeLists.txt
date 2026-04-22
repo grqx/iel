@@ -8,7 +8,7 @@ include(CheckIncludeFile)
 if (MSVC OR WIN32)
     message(FATAL_ERROR "msvc/win32 is unsupported")
 elseif (CMAKE_C_COMPILER_ID STREQUAL "GNU" OR CMAKE_C_COMPILER_ID STREQUAL "Clang")
-    add_compile_options(-Wall -Wextra -Wc++-compat -pedantic -fvisibility=hidden)
+    add_compile_options(-Wall -Wextra -Wmissing-prototypes -Wc++-compat -pedantic -fvisibility=hidden)
 
     add_compile_options(-g -fomit-frame-pointer)
 

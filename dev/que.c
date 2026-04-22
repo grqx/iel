@@ -1,6 +1,8 @@
+// TODO: test pop1 with stop
 #include <stdio.h>  // fprintf, stderr
 #include <stdlib.h>
 #include <stdint.h>
+#include <stdarg.h>
 
 #include <iel_priv/quep.h>
 
@@ -49,6 +51,31 @@ void tstoreull(void *p, unsigned long long ull) {
 #define calloc tcalloc
 #define realloc trealloc
 
+#define STR_(x) #x
+#define STR(x) STR_(x)
+#define FORMAT(arg) _Generic(arg, \
+    int: "%d", \
+    unsigned: "%u", \
+    float: "%f", \
+    void *: "%p", \
+    size_t: "%zu", \
+    unsigned long long: "%llu", \
+    default: "<unprintable>")
+
+static int tests_passed = 0;
+
+#define ASSERT_EQ(a, b) do { \
+    if (!((a)==(b))) { \
+        fprintf(stderr, __FILE__ ":" STR(__LINE__) ": assertion failed: expected "); \
+        fprintf(stderr, FORMAT(a), a); \
+        fprintf(stderr, " == "); \
+        fprintf(stderr, FORMAT(b), b); \
+        fprintf(stderr, "\n"); \
+        abort(); \
+    } else ++tests_passed; \
+} while (0)
+
+
 static inline
 void pque(struct iel_que_st *que) {
     printf("(struct iel_que_st) { .map=%p, .mapcap=%zu, .chunk_s=%zu, .os_s=%hu, .chunk_e=%zu, .os_e=%hu }\nmap: [", que->map, que->mapcap, que->chunk_s, que->os_s, que->chunk_e, que->os_e);
@@ -79,7 +106,7 @@ int main(void) {
         printf("sz: %zu\n", iel_quep_size(&que));
         for (size_t i = 0; i < 32; ++i) {
             void *vout;
-            res = iel_quep_pop1(&que, &vout);
+            res = iel_quep_pop1(&que, &vout, 0, 0);
             if (res < 0) return 3;
             printf("pop: %p; sz: %zu\n", vout, iel_quep_size(&que));
         }
@@ -90,7 +117,7 @@ int main(void) {
     }
     while (1) {
         void *vout;
-        res = iel_quep_pop1(&que, &vout);
+        res = iel_quep_pop1(&que, &vout, 0, 0);
         if (res < 0) break;
         printf("pop: %p; sz: %zu\n", vout, iel_quep_size(&que));
     }
@@ -122,14 +149,42 @@ int main(void) {
         void *p[256];
         size_t out = iel_quep_pop_to(&que, p, 256);
         printf("pop out: %zu\n", out);
+        ASSERT_EQ(out, 256);
         for (size_t i = 0; i < out; ++i)
             printf("%p ", p[i]);
         putchar('\n');
     }
     pque(&que);
     iel_quep_trim(&que);
-    puts("out");
+    puts("end stage 1");
     pque(&que);
+
+    for (size_t i = 0; i < 1024; ++i) {
+        wval = iel_quep_rsv1(&que);
+        if (!wval) return 8;
+        *wval = (void *)(uintptr_t) (i ^ 0xd27);
+    }
+    ASSERT_EQ(iel_quep_size(&que), 1024);
+
+    {
+        iel_que_idx chunk_stop = que.chunk_e;
+        iel_que_offset os_stop = que.os_e;
+
+        for (size_t i = 0; i < 1024; ++i) {
+            void *vout;
+            int res = iel_quep_pop1(&que, &vout, chunk_stop, os_stop);
+            ASSERT_EQ(vout, (void *)(uintptr_t) (i ^ 0xd27));
+            ASSERT_EQ(res, (i == 1023) ? 1 : 0);
+
+            wval = iel_quep_rsv1(&que);
+            if (!wval) return 9;
+            *wval = NULL;
+        }
+    }
+    ASSERT_EQ(iel_quep_size(&que), 1024);
+
+    fprintf(stderr, "assertions passed: %d\n", tests_passed); \
+
     iel_quep_del(&que);
     return 0;
 }

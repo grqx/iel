@@ -33,15 +33,6 @@
 #define IEL_C23ATTR_DEPRECATED(MSG)
 #endif /* <has deprecated> */
 
-#if (defined(__cplusplus) && __cplusplus >= 202002L) || \
-    (defined(__STDC_VERSION__) && __STDC_VERSION__ >= 202311L)
-#define IEL_C23ATTR_LIKELY [[likely]]
-#define IEL_C23ATTR_UNLIKELY [[unlikely]]
-#else
-#define IEL_C23ATTR_LIKELY
-#define IEL_C23ATTR_UNLIKELY
-#endif /* <has likely & unlikely> */
-
 #if (defined(__cplusplus) && __cplusplus >= 202002L) || defined(_MSC_VER) || defined(__GNUC__)
 /* Argument si must be signed; return type t_ui.
  * t_ui is the unsigned version of the type of si.
@@ -66,6 +57,7 @@
 #endif /* <gcc 11+> */
 
 #define IEL_FNATTR_NODISCARD_ IEL_ATTR_GNU(warn_unused_result)
+#define IEL_CQUAL_RESTRICT __restrict__
 
 #ifdef __has_builtin
 #define IEL_HAS_BUILTIN_GNU_(x) __has_builtin(x)
@@ -79,7 +71,7 @@
 #define IEL_HAS_ATTRIBUTE_GNU_(x) 0
 #endif
 
-/* START internal only */
+/* BEGIN internal only */
 
 #if IEL_HAS_BUILTIN_GNU_(__builtin_assume)
 #define IEL_STATTR_ASSUME(x) __builtin_assume(x)  /* clang >= 3.6 */
@@ -98,6 +90,8 @@
 #define IEL_ASSUME_ALIGNED(ptr,al) ptr
 #endif /* <has builtin> */
 
+#define IEL_EXPECT(cond, val) __builtin_expect(!!(cond), val)
+
 /* END internal only */
 
 #undef IEL_HAS_BUILTIN_GNU_
@@ -110,11 +104,17 @@
 #define IEL_ATTR_MSC(x) IEL_C23_NSATTR(msvc, x, __declspec(x))
 #define IEL_FNATTR_ALLOC(dealloc) IEL_ATTR_MSC(restrict)
 #define IEL_FNATTR_NODISCARD_ _Check_return_
+#define IEL_CQUAL_RESTRICT __restrict
 /* TODO: build with /analyze */
 /* TODO: more SAL, maybe? */
 
+/* BEGIN internal only */
+
 #define IEL_STATTR_ASSUME(x) __assume(x)
 #define IEL_ASSUME_ALIGNED(ptr,al) ptr
+#define IEL_EXPECT(cond, val) cond
+
+/* END internal only */
 
 #else
 #define IEL_ATTR_GNU(x)
@@ -122,8 +122,19 @@
 #define IEL_FNATTR_ALLOC(dealloc)
 #define IEL_FNATTR_NODISCARD_
 
+#ifdef __cplusplus
+#define IEL_CQUAL_RESTRICT
+#else
+#define IEL_CQUAL_RESTRICT restrict
+#endif
+
+/* BEGIN internal only */
+
 #define IEL_STATTR_ASSUME(x)
 #define IEL_ASSUME_ALIGNED(ptr,al) ptr
+#define IEL_EXPECT(cond, val) cond
+
+/* END internal only */
 
 #endif /* if defined(__GNUC__) || defined(__clang__) */
 
@@ -152,6 +163,11 @@
 
 /* MUST apply to both the declaration AND the definition */
 #define IEL_FNATTR_NODISCARD IEL_C23ATTR_NODISCARD IEL_FNATTR_NODISCARD_
+
+/* BEGIN internal only */
+#define IEL_LIKELY(cond) (IEL_EXPECT(cond, 1))
+#define IEL_UNLIKELY(cond) (IEL_EXPECT(cond, 0))
+/* END internal only */
 
 #ifdef IEL_BUILDING
 
@@ -191,16 +207,22 @@
 #define IEL_STABLE_GBL IEL_DECL_C IEL_STABLE_API_ extern
 #define IEL_STABLE_API IEL_DECL_C IEL_STABLE_API_ IEL_FNATTR_NOTHROW
 
-/* compulsory for internal globals, optional for functions
- * NEVER USE THE KEYWORD extern IN YOUR CODE!!!
+/* internal only
+ * compulsory for internal globals, optional for functions
+ * NEVER USE THE KEYWORD extern IN PUBLIC HEADERS!!!
  */
 #define IEL_INTERNAL_GBL IEL_SYMATTR_HIDDEN_ extern
 
 #ifndef IEL_BUILDING
 /* undef internal macros for consumers */
-#undef IEL_INTERNAL_GBL
 #undef IEL_STATTR_ASSUME
 #undef IEL_ASSUME_ALIGNED
+#undef IEL_EXPECT
+
+#undef IEL_LIKELY
+#undef IEL_UNLIKELY
+
+#undef IEL_INTERNAL_GBL
 #endif
 
 #endif /* ifndef IEL_CONFIG_H_ */

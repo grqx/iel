@@ -10,7 +10,7 @@ int main(void) {
     iel_tp_init();
     void *p = malloc(sizeof(struct iel_cb_raw_st));
     if (!p) return 1;
-    ((struct iel_cb_raw_st *)p)->base = NULL;  // make the compiler happy
+    ((struct iel_cb_raw_st *)p)->base.cb = NULL;  // make the compiler happy
     uintmax_t tag = 0;
     uintmax_t maxtag = iel_tp_max(IEL_CB_ALIGN);
     while (tag != maxtag) {

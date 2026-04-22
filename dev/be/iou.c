@@ -7,6 +7,7 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
+#include <signal.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <inttypes.h>
@@ -24,6 +25,7 @@
 #include <iel/arg.h>
 #include <iel/tagptr.h>
 #include <iel/init.h>
+#include <iel/errno.h>
 
 static inline
 unsigned long long micros(void)
@@ -64,37 +66,40 @@ struct cbt_onread_comp {
     struct evloop *loop;
     unsigned char *buf;
     unsigned int len;
+    iel_pf_fd f_in, f_out;
 };
 struct cbt_onwrite_comp {
     IEL_CB_BASE base;
-    int sz;
+    size_t sz;
     struct cbt_onread_comp *par;
 };
 static
-void onwrite_comp(void *_self, int res) {
+void onwrite_comp(void *_self, iel_taskres res) {
     struct cbt_onwrite_comp *cbp = (struct cbt_onwrite_comp *)_self;
-    if (res != cbp->sz) {
+    if (res != (iel_taskres)cbp->sz) {
         if (res < 0)
             fprintf(stderr, "write error: %s\n", strerror(-res));
         else
-            fprintf(stderr, "write incomplete: wrote %d/%d bytes\n", res, cbp->sz);
+            fprintf(stderr, "write incomplete: wrote %td/%zu bytes\n", res, cbp->sz);
     } else {
-        IEL_RESOLVE_CALL(cbp->par->loop->vt, iou, fr, (cbp->par->loop->ctx, STDIN_FILENO, cbp->par->buf, cbp->par->len, IEL_ARG_NULL, &cbp->par->base));
+        if (!IEL_RESOLVE_CALL(cbp->par->loop->vt, iou, fr, (cbp->par->loop->ctx, cbp->par->f_in, cbp->par->buf, cbp->par->len, IEL_ARG(IEL_FLAG_NOREG_HANDLE), &cbp->par->base)))
+            cbp->par->base.cb(&cbp->par->base, -iel_errno);
     }
     free(cbp);
 }
 
 static
-void onread_comp(void *_self, int res) {
+void onread_comp(void *_self, iel_taskres res) {
     struct cbt_onread_comp *cbp = (struct cbt_onread_comp *)_self;
     if (res > 0) {
         /* Read successful. Write to stdout. */
         struct cbt_onwrite_comp *wcb = (struct cbt_onwrite_comp *)malloc(sizeof(struct cbt_onwrite_comp));
         if (wcb) {
-            wcb->base = &onwrite_comp;
+            wcb->base.cb = &onwrite_comp;
             wcb->sz = res;
             wcb->par = cbp;
-            IEL_RESOLVE_CALL(cbp->loop->vt, iou, fw, (cbp->loop->ctx, STDOUT_FILENO, cbp->buf, res, IEL_ARG_NULL, &wcb->base));
+            if (!IEL_RESOLVE_CALL(cbp->loop->vt, iou, fw, (cbp->loop->ctx, cbp->f_out, cbp->buf, res, IEL_ARG(IEL_FLAG_NOREG_HANDLE), &wcb->base)))
+                wcb->base.cb(&wcb->base, -iel_errno);
             return;
         }
         else
@@ -109,62 +114,83 @@ void onread_comp(void *_self, int res) {
 }
 
 static
-void ontimer_comp(void *_self, int res) {
+void ontimer_comp(void *_self, iel_taskres res) {
     if (res < 0)
         fprintf(stderr, "timeout res<0, strerror: %s\n", strerror(-res));
-    fprintf(stderr, "3s time out, res=%d\n", res);
+    fprintf(stderr, "3s time out, res=%td\n", res);
     free(_self);
 }
 
 struct soon_comp {
     IEL_CB_BASE base;
-    uintmax_t rc;
+    struct evloop *loop;
 };
 static
-void taskcb(void *_self, int res) {
+void taskcb(void *_self, iel_taskres res) {
     struct iel_tp_untag_st ut = iel_tp_untag(_self, IEL_CB_ALIGN);
     struct soon_comp *out = (struct soon_comp *)ut.ptr;
-    fprintf(stderr, "soon: %d, tag = %#" PRIxMAX "\n", res, ut.tag);
-    if (!--out->rc)
+    fprintf(stderr, "soon: %td, tag = %#" PRIxMAX "\n", res, ut.tag);
+    if (ut.tag == 0x33)
+        if (!IEL_RESOLVE_CALL(out->loop->vt, iou, esoon, (out->loop->ctx, IEL_ARG_NULL, iel_tp_tag(out, IEL_CB_ALIGN, 0x81)))) {
+            fprintf(stderr, "soon: schedule next failed; soon free\n");
+            free(out);
+        }
+    if (ut.tag == 0x81) {
+        fprintf(stderr, "soon free\n");
         free(out);
+    }
 }
 
 struct tcpecho {
     IEL_CB_BASE base_read;  /* sa/sw */
     struct evloop *loop;
     IEL_CB_BASE base_write;  /* sr */
-    iel_pf_sockfd sock;
+    iel_pf_reg_fd sock;
     unsigned char *buf; /* 4096 */
     char rstate;
 };
 
 static
-void tcpecho_read(void *_self, int res) {
+void tcpecho_read(void *_self, iel_taskres res) {
     struct tcpecho *pcb = (struct tcpecho *)_self;
+    fprintf(stderr, "%s: %td\n", __func__, -res);
     if (res <= 0) {
-        free(pcb->buf);
-        close(pcb->sock);
-        free(pcb);
-        return;
+        goto fail;
     }
+
     if (pcb->rstate == 'A') {
         pcb->rstate = 'W';
-        close(pcb->sock);
-        pcb->sock = res;
+        IEL_RESOLVE_CALL(pcb->loop->vt, iou, xreg, (pcb->loop->ctx, IEL_XREG_DE_SOCKETS, &pcb->sock, NULL, 1, IEL_ARG(pcb->sock.reg == IEL_PF_SOCKFD_R_INVAL ? 2ULL : 3ULL)));
+        pcb->sock.raw = res;
+        if (IEL_RESOLVE_CALL(pcb->loop->vt, iou, xreg, (pcb->loop->ctx, IEL_XREG_SOCKETS, NULL, &pcb->sock, 1, IEL_ARG_NULL)) < 0) {
+            fprintf(stderr, "xreg hard failure: %d\n", iel_errno);
+            goto fail;
+        }
     }
-    IEL_RESOLVE_CALL(pcb->loop->vt, iou, sr, (pcb->loop->ctx, pcb->sock, pcb->buf, 4096, IEL_ARG_NULL, &pcb->base_write));
+    if (!IEL_RESOLVE_CALL(pcb->loop->vt, iou, sr, (
+            pcb->loop->ctx, IEL_BE_REGS(pcb->sock), pcb->buf, 4096, IEL_ARG(IEL_BE_REGS_FLAG(pcb->sock)),
+            &pcb->base_write)))
+        pcb->base_write.cb(&pcb->base_write, -iel_errno);
+    return;
+fail:;
+    free(pcb->buf);
+    IEL_RESOLVE_CALL(pcb->loop->vt, iou, xreg, (pcb->loop->ctx, IEL_XREG_DE_SOCKETS, &pcb->sock, NULL, 1, IEL_ARG(pcb->sock.reg == IEL_PF_SOCKFD_R_INVAL ? 2ULL : 3ULL)));
+    free(pcb);
 }
 
 static
-void tcpecho_write(void *_self, int res) {
+void tcpecho_write(void *_self, iel_taskres res) {
     struct tcpecho *pcb = (struct tcpecho *)(((char *)_self) - offsetof(struct tcpecho, base_write));
     if (res <= 0) {
         free(pcb->buf);
-        close(pcb->sock);
+        IEL_RESOLVE_CALL(pcb->loop->vt, iou, xreg, (pcb->loop->ctx, IEL_XREG_DE_SOCKETS, &pcb->sock, NULL, 1, IEL_ARG(pcb->sock.reg == IEL_PF_SOCKFD_R_INVAL ? 2ULL : 3ULL)));
         free(pcb);
         return;
     }
-    IEL_RESOLVE_CALL(pcb->loop->vt, iou, sw, (pcb->loop->ctx, pcb->sock, pcb->buf, res, IEL_ARG_NULL, &pcb->base_read));
+    if (!IEL_RESOLVE_CALL(pcb->loop->vt, iou, sw, (
+            pcb->loop->ctx, IEL_BE_REGS(pcb->sock), pcb->buf, res, IEL_ARG(IEL_BE_REGS_FLAG(pcb->sock)),
+            &pcb->base_read)))
+        pcb->base_read.cb(&pcb->base_read, -iel_errno);
 }
 
 struct connect_comp {
@@ -178,36 +204,40 @@ struct connect_comp {
 };
 
 static
-void onconnect_dowrite(void *_self, int res) {
+void onconnect_dowrite(void *_self, iel_taskres res) {
     struct connect_comp *pcb = (struct connect_comp *)_self;
     if (res < 0) {
         fprintf(stderr, "connect(): %s\n", strerror(-res));
-        close(pcb->sock);
+        iel_pf_reg_sockfd unreg = { .raw=pcb->sock, .reg=IEL_PF_SOCKFD_R_INVAL };
+        IEL_RESOLVE_CALL(pcb->loop->vt, iou, xreg, (pcb->loop->ctx, IEL_XREG_DE_SOCKETS, &unreg, NULL, 1, IEL_ARG(2ULL)));
         free(pcb->buf);
         pcb->loop->stop = 1;
         free(pcb);
         return;
     }
-    IEL_RESOLVE_CALL(pcb->loop->vt, iou, sw, (pcb->loop->ctx, pcb->sock, pcb->buf, 4100, IEL_ARG_NULL, &pcb->base_read));
+    if (!IEL_RESOLVE_CALL(pcb->loop->vt, iou, sw, (pcb->loop->ctx, pcb->sock, pcb->buf, 4100, IEL_ARG(IEL_FLAG_NOREG_HANDLE), &pcb->base_read)))
+        pcb->base_read.cb(&pcb->base_read, -iel_errno);
 }
 
 static
-void onconnect_doread(void *_self, int res) {
+void onconnect_doread(void *_self, iel_taskres res) {
     struct connect_comp *pcb = (struct connect_comp *)((char *)_self - offsetof(struct connect_comp, base_read));
     if (res <= 0) {
         fprintf(stderr, "write(): %s\n", strerror(-res));
-        close(pcb->sock);
+        iel_pf_reg_sockfd unreg = { .raw=pcb->sock, .reg=IEL_PF_SOCKFD_R_INVAL };
+        IEL_RESOLVE_CALL(pcb->loop->vt, iou, xreg, (pcb->loop->ctx, IEL_XREG_DE_SOCKETS, &unreg, NULL, 1, IEL_ARG(2ULL)));
         free(pcb->buf);
         pcb->loop->stop = 1;
         free(pcb);
         return;
     }
-    IEL_RESOLVE_CALL(pcb->loop->vt, iou, sr, (pcb->loop->ctx, pcb->sock, pcb->buf, 4100, IEL_ARG_NULL, &pcb->base_vfy));
+    if (!IEL_RESOLVE_CALL(pcb->loop->vt, iou, sr, (pcb->loop->ctx, pcb->sock, pcb->buf, 4100, IEL_ARG(IEL_FLAG_NOREG_HANDLE), &pcb->base_vfy)))
+        pcb->base_vfy.cb(&pcb->base_vfy, -iel_errno);
     // TODO: should partial reads/writes be handled by the library?
 }
 
 static
-void onconnect_vfy(void *_self, int res) {
+void onconnect_vfy(void *_self, iel_taskres res) {
     struct connect_comp *pcb = (struct connect_comp *)((char *)_self - offsetof(struct connect_comp, base_vfy));
     if (res <= 0) {
         fprintf(stderr, "read(): %s\n", strerror(-res));
@@ -220,9 +250,10 @@ void onconnect_vfy(void *_self, int res) {
                 i, (unsigned char)(i & 0xff), pcb->buf[i]);
             goto free_rsrc;
         }
-    fprintf(stderr, "TCP echo result correct, got %d bytes\n", res);
+    fprintf(stderr, "TCP echo result correct, got %td bytes\n", res);
 free_rsrc:;
-    close(pcb->sock);
+    iel_pf_reg_sockfd unreg = { .raw=pcb->sock, .reg=IEL_PF_SOCKFD_R_INVAL };
+    IEL_RESOLVE_CALL(pcb->loop->vt, iou, xreg, (pcb->loop->ctx, IEL_XREG_DE_SOCKETS, &unreg, NULL, 1, IEL_ARG(2ULL)));
     free(pcb->buf);
     pcb->loop->stop = 1;
     free(pcb);
@@ -240,23 +271,27 @@ int amain_c(struct evloop *loop) {
     cbp->buf = (unsigned char *)malloc(4100);
     if (!cbp->buf)
         goto err_freecbp;
-    cbp->base_write = &onconnect_dowrite;
-    cbp->base_read = &onconnect_doread;
-    cbp->base_vfy = &onconnect_vfy;
+    cbp->base_write.cb = &onconnect_dowrite;
+    cbp->base_read.cb = &onconnect_doread;
+    cbp->base_vfy.cb = &onconnect_vfy;
     cbp->loop = loop;
     cbp->sock = sock;
     // zero init not required for sin
     cbp->sin.sin_family = AF_INET;
     cbp->sin.sin_addr.s_addr = htonl(0x7f000001);
     cbp->sin.sin_port = htons(6789);
-    IEL_RESOLVE_CALL(loop->vt, iou, sc, (loop->ctx, sock, &cbp->sin.sin_family, sizeof(cbp->sin), IEL_ARG_NULL, &cbp->base_write));
+    if (!IEL_RESOLVE_CALL(loop->vt, iou, sc, (loop->ctx, sock, &cbp->sin.sin_family, sizeof(cbp->sin), IEL_ARG(IEL_FLAG_NOREG_HANDLE), &cbp->base_write)))
+        cbp->base_write.cb(&cbp->base_write, -iel_errno);
     for (size_t i = 0; i < 4100; ++i)
         cbp->buf[i] = i & 0xff;
     return 0;
 err_freecbp:;
     free(cbp);
 err_closefd:;
-    close(sock);
+    {
+        iel_pf_reg_sockfd unreg = { .raw=sock, .reg=IEL_PF_SOCKFD_R_INVAL };
+        IEL_RESOLVE_CALL(loop->vt, iou, xreg, (loop->ctx, IEL_XREG_DE_SOCKETS, &unreg, NULL, 1, IEL_ARG(2ULL)));
+    }
 err:;
     return 1;
 }
@@ -274,14 +309,17 @@ int amain_s(struct evloop *loop) {
         struct cbt_onread_comp *cbp = (struct cbt_onread_comp *)malloc(sizeof(struct cbt_onread_comp));
         if (!cbp)
             goto err;
-        cbp->base = &onread_comp;
+        cbp->base.cb = &onread_comp;
         cbp->loop = loop;
         cbp->len = 4096;
+        cbp->f_in = STDIN_FILENO;
+        cbp->f_out = STDOUT_FILENO;
         buf = (unsigned char *)calloc(cbp->len, sizeof(unsigned char));
         if (!buf)
             goto err_freecbp;
         cbp->buf = buf;
-        IEL_RESOLVE_CALL(loop->vt, iou, fr, (loop->ctx, STDIN_FILENO, cbp->buf, cbp->len, IEL_ARG_NULL, &cbp->base));
+        if (!IEL_RESOLVE_CALL(loop->vt, iou, fr, (loop->ctx, cbp->f_in, cbp->buf, cbp->len, IEL_ARG(IEL_FLAG_NOREG_HANDLE), &cbp->base)))
+            cbp->base.cb(&cbp->base, -iel_errno);
         goto sched_read_out;
 err_freecbp:;
         free(cbp);
@@ -293,27 +331,28 @@ sched_read_out:;
     timer_cb = (struct iel_cb_raw_st *)malloc(sizeof(struct iel_cb_raw_st));
     if (!timer_cb)
         goto err_out;
-    timer_cb->base = &ontimer_comp;
+    timer_cb->base.cb = &ontimer_comp;
     for (size_t i = 0;;) {
         struct soon_comp *task_cb = (struct soon_comp *)malloc(sizeof(*task_cb));
         uintmax_t tag = 0;
         if (!task_cb)
             break;
         fprintf(stderr, "soon-alloc: %p\n", (void *)task_cb);
-        task_cb->base = &taskcb;
+        task_cb->base.cb = &taskcb;
+        task_cb->loop = loop;
         do {  // its guaranteed that tagmax > 0
             void *sub_ctx = iel_tp_tag((void *)task_cb, IEL_CB_ALIGN, tag);
-            IEL_RESOLVE_CALL(loop->vt, iou, esoon, (loop->ctx, IEL_ARG_NULL, sub_ctx));
+            if (!IEL_RESOLVE_CALL(loop->vt, iou, esoon, (loop->ctx, IEL_ARG_NULL, sub_ctx)))
+                task_cb->base.cb(sub_ctx, -iel_errno);
             ++tag;
             if (++i >= 66) {
-                task_cb->rc = tag;
                 goto endfillsoon;
             }
         } while (tag < tagmax);
-        task_cb->rc = tag;
     }
 endfillsoon:;
-    IEL_RESOLVE_CALL(loop->vt, iou, etime, (loop->ctx, 3000000, IEL_ARG(IEL_FLAG_ETIME_MICROS), timer_cb));
+    if (!IEL_RESOLVE_CALL(loop->vt, iou, etime, (loop->ctx, 3000000, IEL_ARG(IEL_FLAG_ETIME_MICROS), timer_cb)))
+        timer_cb->base.cb(&timer_cb->base, -iel_errno);
     tcpecho_ssock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (tcpecho_ssock < 0)
         goto err_out;
@@ -331,17 +370,34 @@ endfillsoon:;
     tcpecho->buf = (unsigned char *)malloc(4096);
     if (!tcpecho->buf)
         goto err_freetcpecho;
-    tcpecho->base_read = &tcpecho_read;
-    tcpecho->base_write = &tcpecho_write;
+    tcpecho->base_read.cb = &tcpecho_read;
+    tcpecho->base_write.cb = &tcpecho_write;
     tcpecho->loop = loop;
+    tcpecho->sock.raw = tcpecho_ssock;
     tcpecho->rstate = 'A';
-    tcpecho->sock = tcpecho_ssock;
-    IEL_RESOLVE_CALL(loop->vt, iou, sa, (loop->ctx, tcpecho_ssock, NULL, NULL, IEL_ARG_NULL, &tcpecho->base_read));
+    if (IEL_RESOLVE_CALL(loop->vt, iou, xreg, (
+            loop->ctx, IEL_XREG_SOCKETS, NULL, &tcpecho->sock, 1, IEL_ARG_NULL)) < 0) {
+        fprintf(stderr, "xreg hard failure: %d\n", iel_errno);
+        goto err_freebuf;
+    }
+
+    fprintf(stderr, "xreg sock %d -> %d\n", tcpecho->sock.raw, tcpecho->sock.reg);
+
+    if (!IEL_RESOLVE_CALL(loop->vt, iou, sa, (
+            loop->ctx, IEL_BE_REGS(tcpecho->sock), NULL, NULL, IEL_ARG(IEL_BE_REGS_FLAG(tcpecho->sock)),
+            &tcpecho->base_read)))
+        tcpecho->base_read.cb(&tcpecho->base_read, -iel_errno);
+
     return 0;
+err_freebuf:;
+    free(tcpecho->buf);
 err_freetcpecho:;
     free(tcpecho);
 err_closefd:;
-    close(tcpecho_ssock);
+    {
+        iel_pf_reg_sockfd unreg = { .raw=tcpecho_ssock, .reg=IEL_PF_SOCKFD_R_INVAL };
+        IEL_RESOLVE_CALL(loop->vt, iou, xreg, (loop->ctx, IEL_XREG_DE_SOCKETS, &unreg, NULL, 1, IEL_ARG(2ULL)));
+    }
 err_out:;
     return 1;
 }
@@ -379,6 +435,10 @@ int main(int argc, char **argv) {
         perror("seccomp");
         return 1;
     }
+
+#ifdef SIGPIPE
+    signal(SIGPIPE, SIG_IGN);
+#endif
 
     if (argc > 2) {
         fprintf(stderr, "too many args!\n");
@@ -419,7 +479,7 @@ int main(int argc, char **argv) {
     {
         iel_fn_lnew *p_lnew = loop.vt.p_lnew;
         unsigned long long m0 = micros();
-        lres = p_lnew(loop.ctx, IEL_ARG_NULL);
+        lres = p_lnew(loop.ctx, 1024, 1024, IEL_ARG_NULL);
         unsigned long long m1 = micros();
         fprintf(stderr, "micros() spent on initialisation: %llu;lres=%d\n", m1 - m0, lres);
     }
@@ -452,7 +512,7 @@ int main(int argc, char **argv) {
     fprintf(stderr, "starting event loop\n");
     while (!loop.stop) {
         fprintf(stderr, "run1 event loop\n");
-        IEL_RESOLVE_CALL(loop.vt, iou, lrun1, (loop.ctx, IEL_ARG_NULL));
+        if (IEL_RESOLVE_CALL(loop.vt, iou, lrun1, (loop.ctx, IEL_ARG_NULL)) < 0) break;
     }
     sq_len = (unsigned) IEL_RESOLVE_CALL(loop.vt, iou, xcntl, (loop.ctx, IELB_IOU_XCNTL_SQLEN, IEL_ARG_NULL, IEL_ARG_NULL)).ull;
     if (sq_len)

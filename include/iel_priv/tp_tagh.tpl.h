@@ -10,6 +10,7 @@
 #include <iel/tagptr.h>
 #include <iel/config.h>
 
+// TODO: virtual is too slow
 static inline IEL_FNATTR_NODISCARD
 struct iel_tp_untag_st IDENT(utp) (void const *ptr, size_t al) {
     IEL_STATTR_ASSUME(!(al & (al - 1)));

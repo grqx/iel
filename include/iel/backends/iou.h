@@ -25,14 +25,14 @@ IEL_BACKEND_X_FNS
 IEL_BACKEND_NEW_FNS
 #undef IEL_BACKEND_FNS_ITER
 
-IEL_API
-void *ielb_ioux_r(void *ctx, iel_pf_fd fd, const unsigned char *buf, size_t count, union iel_arg_un flags, void *cbp);
-IEL_API
-void *ielb_ioux_rv(void *ctx, iel_pf_fd fd, iel_pf_iov *iov, size_t iovcnt, union iel_arg_un flags, void *cbp);
-IEL_API
-void *ielb_ioux_w(void *ctx, iel_pf_fd fd, const unsigned char *buf, size_t count, union iel_arg_un flags, void *cbp);
-IEL_API
-void *ielb_ioux_wv(void *ctx, iel_pf_fd fd, iel_pf_iov *iov, size_t iovcnt, union iel_arg_un flags, void *cbp);
+IEL_API iel_fn_fr ielb_ioux_r;
+IEL_API iel_fn_sr ielb_ioux_r;
+IEL_API iel_fn_frv ielb_ioux_rv;
+IEL_API iel_fn_srv ielb_ioux_rv;
+IEL_API iel_fn_fw ielb_ioux_w;
+IEL_API iel_fn_sw ielb_ioux_w;
+IEL_API iel_fn_fwv ielb_ioux_wv;
+IEL_API iel_fn_swv ielb_ioux_wv;
 
 #define ielb_iou_fr ielb_ioux_r
 #define ielb_iou_frv ielb_ioux_rv
@@ -48,6 +48,7 @@ void *ielb_ioux_wv(void *ctx, iel_pf_fd fd, iel_pf_iov *iov, size_t iovcnt, unio
 struct io_uring_sqe;
 struct io_uring_cqe;
 // read mostly
+/* TODO: use atomic_uint for C++11 compat, or just avoid atomic for C99 header compat? */
 struct ielb_iou_ctx_st {
     /* Submission ring pointers */
     _Atomic(unsigned) const *sring_head;  /* load-acquire */
@@ -66,12 +67,17 @@ struct ielb_iou_ctx_st {
     unsigned lcl_chead;
     unsigned cring_mask;
 
-    struct iel_que_st taskque; /* TODO: confirm soon semantics */
+    struct iel_que_st soonque;  /* TODO: libuv idle */
+    struct iel_que_st prepque;  /* TODO: de/init; libuv prep */
     struct iel_que_st sqofq;  /* Submission Queue overflow queue */
+    /* ----- 192B ----- */
 
     /* ----- cold(SQPOLL) ----- */
     unsigned ring_fd_registered;
     /* ----- cold(NORM) ----- */
+    unsigned filetable_len;
+    void *filetable_bitmap;
+    iel_pf_sockfd *filetable;
     int ring_fd;
     unsigned int maplen_sqes;
     unsigned int maplen_sq;
@@ -84,8 +90,7 @@ struct ielb_iou_ctx_st {
 #endif
 
 /* unsafe variant, could crash the thread but might be slightly faster */
-IEL_API
-int ielb_ioux_lnew_us(void *ctx, union iel_arg_un flags);
+IEL_API iel_fn_lnew ielb_ioux_lnew_us;
 
 IEL_API
 void ielb_ioux_nop_a(union iel_arg_un flags);

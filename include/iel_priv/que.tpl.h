@@ -41,7 +41,7 @@ IEL_QUE_ELEM *IEL_QUE_IDENT(rsv1) (struct iel_que_st *que);
 
 /* Precondition: que, and que is initialised correctly */
 IEL_QUE_API IEL_FNATTR_NODISCARD
-int IEL_QUE_IDENT(pop1) (struct iel_que_st *que, IEL_QUE_ELEM *vout);
+int IEL_QUE_IDENT(pop1) (struct iel_que_st *que, IEL_QUE_ELEM *vout, iel_que_idx chunk_stop, iel_que_offset os_stop);
 
 /* Precondition: que && blk_out, and que is initialised correctly */
 IEL_QUE_API
@@ -118,31 +118,33 @@ IEL_QUE_ELEM *IEL_QUE_IDENT(rsv1) (struct iel_que_st *que) {
 }
 
 IEL_QUE_API IEL_FNATTR_NODISCARD
-int IEL_QUE_IDENT(pop1) (struct iel_que_st *que, IEL_QUE_ELEM *vout) {
+int IEL_QUE_IDENT(pop1) (struct iel_que_st *que, IEL_QUE_ELEM *vout, iel_que_idx chunk_stop, iel_que_offset os_stop) {
     if (que->chunk_e == que->chunk_s && que->os_e == que->os_s)  // empty if all zero
         return -1;
     *vout = IEL_QUE_MAPOF(que)[que->chunk_s][que->os_s];
     que->os_s = (que->os_s + 1) & IEL_QUE_CHUNK_ENTS_MASK;
-    if (!que->os_s) {  // free old chunk
+    if IEL_UNLIKELY (!que->os_s) {  // free old chunk
         iel_aligned_free(IEL_QUE_MAPOF(que)[que->chunk_s]);
         que->chunk_s++;
     }
-    if (que->chunk_e == que->chunk_s && que->os_e == que->os_s) {  // empty
+    if IEL_UNLIKELY (que->chunk_e == que->chunk_s && que->os_e == que->os_s) {  // last
         // reset/simple trim
         if (que->os_e)  // chunk_e allocated
             iel_aligned_free(IEL_QUE_MAPOF(que)[que->chunk_e]);
         que->chunk_s = que->chunk_e = 0;
         que->os_s = que->os_e = 0;
+        return 1;
     }
+    if IEL_UNLIKELY (chunk_stop == que->chunk_s && os_stop == que->os_s)  // last
+        return 1;
     return 0;
 }
 
-#include <stdio.h>
 IEL_QUE_API
 size_t IEL_QUE_IDENT(pop_to) (struct iel_que_st *que, IEL_QUE_ELEM *blk_out, size_t blk_sz) {
     size_t sz = 0;
 
-    if (!blk_sz) return 0;
+    if IEL_UNLIKELY (!blk_sz) return 0;
     while (1) {
         size_t span;
         if (que->chunk_e == que->chunk_s) {  // last chunk

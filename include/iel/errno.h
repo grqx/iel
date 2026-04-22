@@ -3,11 +3,8 @@
 
 #include <iel/config.h>
 
-typedef int iel_error;
+typedef unsigned short iel_error;
 
-#ifdef _WIN32
-#error Unsupported
-#else
 #define IEL_EPERM 1
 #define IEL_ENOENT 2
 #define IEL_EINTR 4
@@ -17,11 +14,14 @@ typedef int iel_error;
 #define IEL_EACCES 13
 #define IEL_EINVAL 22
 #define IEL_ECANCELED 125
-#endif
+#define IEL_ENOBUFS 105
+#define IEL_E_NOIMPL 666
 
 IEL_STABLE_API IEL_FNATTR_NODISCARD IEL_FNATTR_CONST
 iel_error *iel_errno_getloc(void);
 
 #define iel_errno (*iel_errno_getloc())
+
+/* TODO: convert error, strerror */
 
 #endif /* ifndef IEL_ERRNO_H_ */

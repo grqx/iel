@@ -5,19 +5,25 @@
 #include <stddef.h>
 
 #include <iel/platform.h>
+#include <iel/config.h>
 #include <iel/arg.h>
 
 struct iel_vtable_st;
 
-typedef int iel_taskres;
-typedef void (*iel_cb)(void *, iel_taskres);
+typedef ptrdiff_t iel_taskres;
+typedef void (iel_cbfn)(void *, iel_taskres);
+typedef iel_cbfn *iel_cb;
+/* intrusive struct, we can put OVERLAPPED here if needed later for IOCP */
+struct iel_cb_base {
+    iel_cb cb;
+};
 /* TODO: add a flag for max-aligned callbacks(incompatible ABI!) */
 #if 0
 #define IEL_CB_ALIGN alignof(max_align_t)
 #else
 #define IEL_CB_ALIGN alignof(iel_cb)
 #endif
-#define IEL_CB_BASE alignas(IEL_CB_ALIGN) iel_cb
+#define IEL_CB_BASE alignas(IEL_CB_ALIGN) struct iel_cb_base
 
 struct iel_cb_raw_st {
     IEL_CB_BASE base;
@@ -49,42 +55,42 @@ typedef unsigned char (iel_fn_vtsetup)(struct iel_vtable_st *);
 
 /* fp/FilePosition series */
 /* FilePosition::Read */
-typedef void *(iel_fn_fpr)(void *ctx, iel_pf_fd fd, const unsigned char *buf, size_t count, iel_pf_pos offset, union iel_arg_un flags, void *cbp);
+typedef void *(iel_fn_fpr)(void *ctx, iel_pf_fd_r fd, const unsigned char *buf, size_t count, iel_pf_pos offset, union iel_arg_un flags, void *cbp);
 /* FilePosition::ReadVector */
-typedef void *(iel_fn_fprv)(void *ctx, iel_pf_fd fd, iel_pf_iov *iovecs, size_t iovcnt, iel_pf_pos offset, union iel_arg_un flags, void *cbp);
+typedef void *(iel_fn_fprv)(void *ctx, iel_pf_fd_r fd, iel_pf_iov *iovecs, size_t iovcnt, iel_pf_pos offset, union iel_arg_un flags, void *cbp);
 /* FilePosition::Write */
-typedef void *(iel_fn_fpw)(void *ctx, iel_pf_fd fd, const unsigned char *buf, size_t count, iel_pf_pos offset, union iel_arg_un flags, void *cbp);
+typedef void *(iel_fn_fpw)(void *ctx, iel_pf_fd_r fd, const unsigned char *buf, size_t count, iel_pf_pos offset, union iel_arg_un flags, void *cbp);
 /* FilePosition::WriteVector */
-typedef void *(iel_fn_fpwv)(void *ctx, iel_pf_fd fd, iel_pf_iov *iovecs, size_t iovcnt, iel_pf_pos offset, union iel_arg_un flags, void *cbp);
+typedef void *(iel_fn_fpwv)(void *ctx, iel_pf_fd_r fd, iel_pf_iov *iovecs, size_t iovcnt, iel_pf_pos offset, union iel_arg_un flags, void *cbp);
 
 /* f/File series */
 /* File::Read */
-typedef void *(iel_fn_fr)(void *ctx, iel_pf_fd fd, const unsigned char *buf, size_t count, union iel_arg_un flags, void *cbp);
+typedef void *(iel_fn_fr)(void *ctx, iel_pf_fd_r fd, const unsigned char *buf, size_t count, union iel_arg_un flags, void *cbp);
 /* File::ReadVector */
-typedef void *(iel_fn_frv)(void *ctx, iel_pf_fd fd, iel_pf_iov *iov, size_t iovcnt, union iel_arg_un flags, void *cbp);
+typedef void *(iel_fn_frv)(void *ctx, iel_pf_fd_r fd, iel_pf_iov *iov, size_t iovcnt, union iel_arg_un flags, void *cbp);
 /* File::Write */
-typedef void *(iel_fn_fw)(void *ctx, iel_pf_fd fd, const unsigned char *buf, size_t count, union iel_arg_un flags, void *cbp);
+typedef void *(iel_fn_fw)(void *ctx, iel_pf_fd_r fd, const unsigned char *buf, size_t count, union iel_arg_un flags, void *cbp);
 /* File::WriteVector */
-typedef void *(iel_fn_fwv)(void *ctx, iel_pf_fd fd, iel_pf_iov *iov, size_t iovcnt, union iel_arg_un flags, void *cbp);
+typedef void *(iel_fn_fwv)(void *ctx, iel_pf_fd_r fd, iel_pf_iov *iov, size_t iovcnt, union iel_arg_un flags, void *cbp);
 
 /* s/Socket series */
 /* Socket::Accept
  * Completes when read-ready.
  */
-typedef void *(iel_fn_sa)(void *ctx, iel_pf_sockfd fd, iel_pf_sockaf *addr_out, iel_pf_socklen *addrlen_out, union iel_arg_un flags, void *cbp);
+typedef void *(iel_fn_sa)(void *ctx, iel_pf_sockfd_r fd, iel_pf_sockaf *addr_out, iel_pf_socklen *addrlen_out, union iel_arg_un flags, void *cbp);
 /* Socket::Connect
  * Completes when write-ready.
  */
-typedef void *(iel_fn_sc)(void *ctx, iel_pf_sockfd fd, iel_pf_sockaf *addr, iel_pf_socklen addrlen, union iel_arg_un flags, void *cbp);
+typedef void *(iel_fn_sc)(void *ctx, iel_pf_sockfd_r fd, iel_pf_sockaf *addr, iel_pf_socklen addrlen, union iel_arg_un flags, void *cbp);
 
 /* Socket::Read */
-typedef void *(iel_fn_sr)(void *ctx, iel_pf_sockfd fd, const unsigned char *buf, size_t count, union iel_arg_un flags, void *cbp);
+typedef void *(iel_fn_sr)(void *ctx, iel_pf_sockfd_r fd, const unsigned char *buf, size_t count, union iel_arg_un flags, void *cbp);
 /* Socket::ReadVector */
-typedef void *(iel_fn_srv)(void *ctx, iel_pf_sockfd fd, iel_pf_iov *iov, size_t iovcnt, union iel_arg_un flags, void *cbp);
+typedef void *(iel_fn_srv)(void *ctx, iel_pf_sockfd_r fd, iel_pf_iov *iov, size_t iovcnt, union iel_arg_un flags, void *cbp);
 /* Socket::Write */
-typedef void *(iel_fn_sw)(void *ctx, iel_pf_sockfd fd, const unsigned char *buf, size_t count, union iel_arg_un flags, void *cbp);
+typedef void *(iel_fn_sw)(void *ctx, iel_pf_sockfd_r fd, const unsigned char *buf, size_t count, union iel_arg_un flags, void *cbp);
 /* Socket::WriteVector */
-typedef void *(iel_fn_swv)(void *ctx, iel_pf_sockfd fd, iel_pf_iov *iov, size_t iovcnt, union iel_arg_un flags, void *cbp);
+typedef void *(iel_fn_swv)(void *ctx, iel_pf_sockfd_r fd, iel_pf_iov *iov, size_t iovcnt, union iel_arg_un flags, void *cbp);
 
 /* e/Execute series
  * TODO: libuv-ish idle(don't call it idle)/prepare callback queue
@@ -98,7 +104,7 @@ typedef void *(iel_fn_esoon)(void *ctx, union iel_arg_un flags, void *cbp);
 /* Loop::GetCtxSize */
 typedef size_t (iel_fn_lsize)(void);
 /* Loop::New */
-typedef int (iel_fn_lnew)(void *ctx, union iel_arg_un flags);
+typedef int (iel_fn_lnew)(void *ctx, long max_files, long max_bufs, union iel_arg_un flags);
 /* Loop::Delete */
 typedef void (iel_fn_ldel)(void *ctx);
 /* Loop::RunOnce
@@ -124,6 +130,8 @@ typedef int (iel_fn_lrun1)(void *ctx, union iel_arg_un flags);
 typedef unsigned long long (iel_fn_xfeat)(void *ctx, union iel_arg_un flags);
 /* Misc::Control */
 typedef union iel_arg_un (iel_fn_xcntl)(void *ctx, unsigned short op, union iel_arg_un arg0, union iel_arg_un arg1);
+/* Misc::AsyncRegisterResource */
+typedef iel_taskres (iel_fn_xreg)(void *ctx, unsigned char opcode, void const * /*Nullable*/ IEL_CQUAL_RESTRICT in, void * IEL_CQUAL_RESTRICT out, size_t nr_args, union iel_arg_un flags);
 /* Misc::Initialize */
 typedef void (iel_fn_xinit)(union iel_arg_un flags);
 /* Misc::TearDown */
@@ -161,6 +169,7 @@ typedef void (iel_fn_xtdwn)(union iel_arg_un flags);
 
 #define IEL_BACKEND_X_FNS \
     IEL_BACKEND_FNS_ITER(xfeat) \
+    IEL_BACKEND_FNS_ITER(xreg) \
     IEL_BACKEND_FNS_ITER(xcntl) \
     IEL_BACKEND_FNS_ITER(xinit) \
     IEL_BACKEND_FNS_ITER(xtdwn)
@@ -196,19 +205,38 @@ struct iel_vtable_st {
 #define IEL_FEAT_ETIME_MICROS (1ULL << 62)
 /* Indicates availability of the flag IEL_FLAG_REQLNK */
 #define IEL_FEAT_REQLNK (1ULL << 61)
+#define IEL_FEAT_NOREG_HANDLE (1ULL << 60)
 
 /* Applies to: etime
  * Available when: feature flag IEL_FEAT_ETIME_MICROS is set
  * Changes the unit of time to wait to microseconds instead of milliseconds (the default).
  */
 #define IEL_FLAG_ETIME_MICROS (1ULL << 63)
+/* Applies to: esoon
+ * Available when: always
+ * Calls the callback on next loop. (Default: execute as soon as possible)
+ */
+#define IEL_FLAG_ESOON_NEXT (1ULL << 63)
 /* Applies to: fp series, f series, s series, etime
  * Available when: feature flag IEL_FEAT_REQLNK is set
  * Links the current task with the next one.
  * The user_data argument will be ignored.
- * XXX: esoon is not yet supported
+ * XXX: esoon is not supported
  */
 #define IEL_FLAG_REQLNK (1ULL << 62)
+#define IEL_FLAG_NOREG_HANDLE (1ULL << 61)
+
+/* typ is fd or sockfd */
+#define IEL_BE_REGF(reg_st) \
+    ( (reg_st).reg != IEL_PF_FD_R_INVAL ? (reg_st).reg : (reg_st).raw )
+#define IEL_BE_REGS(reg_st) \
+    ( (reg_st).reg != IEL_PF_SOCKFD_R_INVAL ? (reg_st).reg : (reg_st).raw )
+
+#define IEL_BE_REGF_FLAG(reg_st) \
+    ( (reg_st).reg != IEL_PF_FD_R_INVAL ? 0 : IEL_FLAG_NOREG_HANDLE )
+#define IEL_BE_REGS_FLAG(reg_st) \
+    ( (reg_st).reg != IEL_PF_SOCKFD_R_INVAL ? 0 : IEL_FLAG_NOREG_HANDLE )
+
 #if 0
 /* Applies to: fp series, f series, s series, etime
  * Available when: FIXME: false
@@ -217,5 +245,14 @@ struct iel_vtable_st {
  */
 #define IEL_FLAG_MULTISHOT (1ULL << 62)
 #endif
+
+/* xreg() opcode for registering files */
+#define IEL_XREG_FILES ((unsigned char) '\x00')
+#define IEL_XREG_SOCKETS ((unsigned char) '\x01')
+#define IEL_XREG_DE_FILES ((unsigned char) '\x02')
+#define IEL_XREG_DE_SOCKETS ((unsigned char) '\x03')
+
+#define IEL_FLAG_XREG_DRG (1ULL)
+#define IEL_FLAG_XREG_DEL (2ULL)
 
 #endif /* ifndef IEL_BACKENDS_H_ */
